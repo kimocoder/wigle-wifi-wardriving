@@ -1,12 +1,5 @@
 package net.wigle.wigleandroid;
 
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.regex.Matcher;
-
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.SharedPreferences;
@@ -30,6 +23,13 @@ import com.google.maps.android.ui.IconGenerator;
 
 import net.wigle.wigleandroid.model.Network;
 
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+
 public class MapRender implements ClusterManager.OnClusterClickListener<Network>,
         ClusterManager.OnClusterInfoWindowClickListener<Network>,
         ClusterManager.OnClusterItemClickListener<Network>,
@@ -41,7 +41,7 @@ public class MapRender implements ClusterManager.OnClusterClickListener<Network>
     private final AtomicInteger networkCount = new AtomicInteger();
     private final SharedPreferences prefs;
     private final GoogleMap map;
-    private final Matcher ssidMatcher;
+    private Matcher ssidMatcher;
     private final Set<Network> labeledNetworks = Collections.newSetFromMap(
             new ConcurrentHashMap<Network,Boolean>());
 
@@ -200,7 +200,7 @@ public class MapRender implements ClusterManager.OnClusterClickListener<Network>
         this.map = map;
         this.isDbResult = isDbResult;
         prefs = context.getSharedPreferences( ListFragment.SHARED_PREFS, 0 );
-        ssidMatcher = FilterMatcher.getFilterMatcher( prefs, MappingFragment.MAP_DIALOG_PREFIX );
+        ssidMatcher = FilterMatcher.getSsidFilterMatcher( prefs, MappingFragment.MAP_DIALOG_PREFIX );
         mClusterManager = new ClusterManager<>(context, map);
         networkRenderer = new NetworkRenderer(context, map, mClusterManager);
         mClusterManager.setRenderer(networkRenderer);
@@ -244,7 +244,9 @@ public class MapRender implements ClusterManager.OnClusterClickListener<Network>
                 && ! isDbResult;
         if (network.getPosition() != null) {
             if (!showNewDBOnly || network.isNew()) {
-                if (FilterMatcher.isOk(ssidMatcher, prefs, MappingFragment.MAP_DIALOG_PREFIX, network)) {
+                if (FilterMatcher.isOk(ssidMatcher,
+                        null /*ALIBI: we *can* use the filter from the list filter view here ...*/,
+                        prefs, MappingFragment.MAP_DIALOG_PREFIX, network)) {
                     return true;
                 }
             }
@@ -302,6 +304,11 @@ public class MapRender implements ClusterManager.OnClusterClickListener<Network>
         if (!isDbResult) {
             addLatestNetworks();
         }
+    }
+
+    public void onResume() {
+        ssidMatcher = FilterMatcher.getSsidFilterMatcher( prefs, MappingFragment.MAP_DIALOG_PREFIX );
+        reCluster();
     }
 
     public void updateNetwork(final Network network) {

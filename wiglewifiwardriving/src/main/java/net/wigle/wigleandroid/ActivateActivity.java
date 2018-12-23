@@ -1,7 +1,5 @@
 package net.wigle.wigleandroid;
 
-import android.*;
-import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.net.Uri;
@@ -16,24 +14,16 @@ import android.util.Log;
 import android.util.SparseArray;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
-import android.widget.Toast;
 
 import com.google.android.gms.vision.CameraSource;
 import com.google.android.gms.vision.Detector;
 import com.google.android.gms.vision.barcode.Barcode;
 import com.google.android.gms.vision.barcode.BarcodeDetector;
 
-import java.io.IOException;
-import java.security.InvalidKeyException;
-import java.security.KeyStoreException;
-import java.security.NoSuchAlgorithmException;
-import java.security.UnrecoverableEntryException;
-import java.security.cert.CertificateException;
-import java.util.Arrays;
+import net.wigle.wigleandroid.ui.WiGLEToast;
 
-import javax.crypto.BadPaddingException;
-import javax.crypto.IllegalBlockSizeException;
-import javax.crypto.NoSuchPaddingException;
+import java.io.IOException;
+import java.util.Arrays;
 
 /**
  * fetch wigle authentication tokens by scanning a barcode
@@ -42,7 +32,7 @@ import javax.crypto.NoSuchPaddingException;
 public class ActivateActivity extends Activity {
 
     //intent string
-    public static String barcodeIntent = "net.wigle.wigleandroid://activate";
+    public static final String barcodeIntent = "net.wigle.wigleandroid://activate";
 
     //log tag for activity
     private static final String LOG_TAG = "wigle.activate";
@@ -66,7 +56,7 @@ public class ActivateActivity extends Activity {
         Uri data = getIntent().getData();
         //DEBUG Log.i(LOG_TAG, "intent data: "+data+" matches: "+
         //        ActivateActivity.barcodeIntent.equals(data.toString()));
-        if (ActivateActivity.barcodeIntent.equals(data.toString())) {
+        if (data != null && ActivateActivity.barcodeIntent.equals(data.toString())) {
             launchBarcodeScanning();
         } else {
             Log.e(LOG_TAG, "intent data: "+data+" did not match "+ActivateActivity.barcodeIntent);
@@ -86,8 +76,8 @@ public class ActivateActivity extends Activity {
                         .setBarcodeFormats(Barcode.QR_CODE)
                         .build();
         if (!barcodeDetector.isOperational()) {
-            Toast.makeText(this.getApplicationContext(),
-                    "Barcode detection not available on this device", Toast.LENGTH_LONG);
+            //ALIBI: this *should* be unreachable, but the diversity of android devices and implementation can make this happen
+            WiGLEToast.showOverActivity(this, R.string.error_general, getString(R.string.no_barcode_support_text));
             Log.e(LOG_TAG, "Barcode detection not available on this device.");
             this.finish();
         } else {

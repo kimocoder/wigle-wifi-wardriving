@@ -1,7 +1,6 @@
 package net.wigle.wigleandroid;
 
 import android.content.Context;
-import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.location.Location;
@@ -106,13 +105,14 @@ public class DashboardFragment extends Fragment {
 
   private void updateUI( final View view ) {
     TextView tv = (TextView) view.findViewById( R.id.runnets );
-    tv.setText( ListFragment.lameStatic.runNets + " " + getString(R.string.run));
+    tv.setText( (ListFragment.lameStatic.runNets + ListFragment.lameStatic.runBt )+ " " + getString(R.string.run));
 
     tv = (TextView) view.findViewById( R.id.newwifi );
     final String scanning = MainActivity.isScanning(getActivity()) ? "" : getString(R.string.dash_scan_off) + "\n";
-    final String newTitle = ListFragment.lameStatic.newWifi >= 10 ? getString(R.string.new_word)
-        : getString(R.string.dash_new_wifi);
-    tv.setText( scanning + ListFragment.lameStatic.newWifi + " " + newTitle );
+    tv.setText( scanning + ListFragment.lameStatic.newWifi + " " + getString(R.string.dash_new_wifi) );
+
+    tv = (TextView) view.findViewById( R.id.newbt );
+    tv.setText( ListFragment.lameStatic.newBt + " " + getString(R.string.dash_new_bt) );
 
     tv = (TextView) view.findViewById( R.id.currnets );
     tv.setText( getString(R.string.dash_vis_nets) + " " + ListFragment.lameStatic.currNets );
@@ -121,9 +121,12 @@ public class DashboardFragment extends Fragment {
     tv.setText( getString(R.string.dash_new_upload) + " " + newNetsSinceUpload() );
 
     tv = (TextView) view.findViewById( R.id.newcells );
-    tv.setText( getString(R.string.dash_new_cells) + " " + ListFragment.lameStatic.newCells );
+    tv.setText( ListFragment.lameStatic.newCells + " " + getString(R.string.dash_new_cells) );
 
     updateDist( view, R.id.rundist, ListFragment.PREF_DISTANCE_RUN, getString(R.string.dash_dist_run) );
+    updateTime(view, R.id.run_dur, ListFragment.PREF_STARTTIME_RUN );
+    updateTimeTare(view, R.id.scan_dur, ListFragment.PREF_CUMULATIVE_SCANTIME_RUN,
+            ListFragment.PREF_STARTTIME_RUN, MainActivity.isScanning(getActivity()));
     updateDist( view, R.id.totaldist, ListFragment.PREF_DISTANCE_TOTAL, getString(R.string.dash_dist_total) );
     updateDist( view, R.id.prevrundist, ListFragment.PREF_DISTANCE_PREV_RUN, getString(R.string.dash_dist_prev) );
 
@@ -169,6 +172,34 @@ public class DashboardFragment extends Fragment {
     tv.setText( title + " " + distString );
   }
 
+  private void updateTime( final View view, final int id, final String pref) {
+    final SharedPreferences prefs = getActivity().getSharedPreferences( ListFragment.SHARED_PREFS, 0 );
+
+    long millis = System.currentTimeMillis();
+    long duration =  millis - prefs.getLong( pref,  millis);
+
+    final String durString = timeString(duration);
+
+    final TextView tv = (TextView) view.findViewById( id );
+    tv.setText( durString );
+  }
+
+  private void updateTimeTare(final View view, final int id, final String prefCumulative,
+                              final String prefCurrent, final boolean isScanning) {
+    final SharedPreferences prefs = getActivity().getSharedPreferences( ListFragment.SHARED_PREFS, 0 );
+
+    long cumulative = prefs.getLong(ListFragment.PREF_CUMULATIVE_SCANTIME_RUN, 0L);
+
+    if (isScanning) {
+      cumulative += System.currentTimeMillis() - prefs.getLong(ListFragment.PREF_STARTTIME_CURRENT_SCAN, System.currentTimeMillis());
+    }
+
+    final String durString = timeString(cumulative);
+    final TextView tv = (TextView) view.findViewById( id );
+    tv.setText(durString );
+
+  }
+
   public static String metersToString(final NumberFormat numberFormat, final Context context, final float meters,
       final boolean useShort ) {
     final SharedPreferences prefs = context.getSharedPreferences( ListFragment.SHARED_PREFS, 0 );
@@ -194,15 +225,6 @@ public class DashboardFragment extends Fragment {
     }
     return retval;
   }
-
-  // XXX
-//  @Override
-//  public void finish() {
-//    ListActivity.info( "finish dash." );
-//    finishing.set( true );
-//
-//    super.finish();
-//  }
 
   @Override
   public void onDestroy() {
@@ -255,6 +277,18 @@ public class DashboardFragment extends Fragment {
   @Override
   public boolean onOptionsItemSelected( final MenuItem item ) {
       return false;
+  }
+
+  private String timeString(final long duration) {
+    //TODO: better to just use TimeUnit?
+    int seconds = (int) (duration / 1000) % 60 ;
+    int minutes = (int) ((duration / (1000*60)) % 60);
+    int hours   = (int) ((duration / (1000*60*60)) % 24);
+    String durString = String.format("%02d", minutes)+":"+String.format("%02d", seconds);
+    if (hours > 0) {
+      durString = String.format("%d", hours) + ":" + durString;
+    }
+    return " " +durString;
   }
 
 }

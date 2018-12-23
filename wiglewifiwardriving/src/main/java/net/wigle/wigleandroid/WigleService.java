@@ -1,6 +1,7 @@
 package net.wigle.wigleandroid;
 
 import android.app.Notification;
+import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
@@ -8,42 +9,25 @@ import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.net.Uri;
+import android.os.Binder;
 import android.os.Build;
 import android.os.IBinder;
 import android.support.v4.app.NotificationCompat;
 
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class WigleService extends Service {
     private static final int NOTIFICATION_ID = 1;
+    public static final String NOTIFICATION_CHANNEL_ID = "wigle_notification_1";
 
     private GuardThread guardThread;
     private final AtomicBoolean done = new AtomicBoolean( false );
     private Bitmap largeIcon = null;
-
-    // copied from javadoc
-    private static final Class<?>[] mSetForegroundSignature = new Class[] {
-            boolean.class};
-    @SuppressWarnings("rawtypes")
-    private static final Class[] mStartForegroundSignature = new Class[] {
-            int.class, Notification.class};
-    @SuppressWarnings("rawtypes")
-    private static final Class[] mStopForegroundSignature = new Class[] {
-            boolean.class};
-
-    private NotificationManager notificationManager;
-    private Method mSetForeground;
-    private Method mStartForeground;
-    private Method mStopForeground;
-    private final Object[] mSetForegroundArgs = new Object[1];
-    private final Object[] mStartForegroundArgs = new Object[2];
-    private final Object[] mStopForegroundArgs = new Object[1];
+    // Binder given to clients
+    private final IBinder wigleServiceBinder = new WigleServiceBinder();
 
     private class GuardThread extends Thread {
-        public GuardThread() {
+        GuardThread() {
         }
 
         @Override
@@ -57,6 +41,17 @@ public final class WigleService extends Service {
         }
     }
 
+    /**
+     * Class used for the client Binder.  Because we know this service always
+     * runs in the same process as its clients, we don't need to deal with IPC.
+     */
+    class WigleServiceBinder extends Binder {
+        WigleService getService() {
+            // Return this instance of LocalService so clients can call public methods
+            return WigleService.this;
+        }
+    }
+
     private void setDone() {
         done.set( true );
         guardThread.interrupt();
@@ -65,7 +60,7 @@ public final class WigleService extends Service {
     @Override
     public IBinder onBind( final Intent intent ) {
         MainActivity.info( "service: onbind. intent: " + intent );
-        return null;
+        return wigleServiceBinder;
     }
 
     @Override
@@ -82,27 +77,28 @@ public final class WigleService extends Service {
         return super.onUnbind( intent );
     }
 
+    /**
+     * This is called if the user force-kills the app
+     */
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        MainActivity.info("service: onTaskRemoved.");
+        if (! done.get()) {
+            final MainActivity mainActivity = MainActivity.getMainActivity();
+            if (mainActivity != null) {
+                mainActivity.finishSoon();
+            }
+            setDone();
+        }
+        shutdownNotification();
+        stopSelf();
+        super.onTaskRemoved(rootIntent);
+        MainActivity.info("service: onTaskRemoved complete.");
+    }
+
     @Override
     public void onCreate() {
         MainActivity.info( "service: onCreate" );
-
-        notificationManager = (NotificationManager)getSystemService(NOTIFICATION_SERVICE);
-        try {
-            mStartForeground = getClass().getMethod("startForeground",
-                    mStartForegroundSignature);
-            mStopForeground = getClass().getMethod("stopForeground",
-                    mStopForegroundSignature);
-        } catch (NoSuchMethodException e) {
-            // Running on an older platform.
-            mStartForeground = mStopForeground = null;
-        }
-        try {
-            mSetForeground = getClass().getMethod("setForeground",
-                    mSetForegroundSignature);
-        } catch (NoSuchMethodException e) {
-            throw new IllegalStateException(
-                    "OS doesn't have Service.startForeground OR Service.setForeground!");
-        }
 
         setupNotification();
 
@@ -135,26 +131,29 @@ public final class WigleService extends Service {
     public void onStart( Intent intent, int startId ) {
         MainActivity.info( "service: onStart" );
         handleCommand( intent );
+        setupNotification();
     }
 
     @Override
     public int onStartCommand( Intent intent, int flags, int startId ) {
         MainActivity.info( "service: onStartCommand" );
         handleCommand( intent );
+        setupNotification();
         // We want this service to continue running until it is explicitly
         // stopped, so return sticky.
-        return 1;
+        return Service.START_STICKY;
     }
 
     private void handleCommand( Intent intent ) {
         MainActivity.info( "service: handleCommand: intent: " + intent );
+        setupNotification();
     }
 
     private void shutdownNotification() {
-        stopForegroundCompat( NOTIFICATION_ID );
+        stopForeground(true);
     }
 
-    private void setupNotification() {
+    public void setupNotification() {
         if ( ! done.get() ) {
             final long when = System.currentTimeMillis();
             final Context context = getApplicationContext();
@@ -165,8 +164,10 @@ public final class WigleService extends Service {
             final long dbNets = ListFragment.lameStatic.dbNets;
             String text = context.getString(R.string.list_waiting_gps);
             if ( dbNets > 0 ) {
-                text = context.getString(R.string.run) + ": " + ListFragment.lameStatic.runNets
-                        + "  "+ context.getString(R.string.new_word) + ": " + ListFragment.lameStatic.newNets
+                long runNets = ListFragment.lameStatic.runNets + ListFragment.lameStatic.runBt;
+                long newNets = ListFragment.lameStatic.newNets;
+                text = context.getString(R.string.run) + ": " + runNets
+                        + "  "+ context.getString(R.string.new_word) + ": " +newNets
                         + "  "+ context.getString(R.string.db) + ": " + dbNets;
             }
             if (! MainActivity.isScanning(context)) {
@@ -176,92 +177,112 @@ public final class WigleService extends Service {
                 largeIcon = BitmapFactory.decodeResource(getResources(), R.drawable.wiglewifi);
             }
 
-            final NotificationCompat.Builder builder = new NotificationCompat.Builder(context);
+            final Intent pauseSharedIntent = new Intent();
+            pauseSharedIntent.setAction("net.wigle.wigleandroid.PAUSE");
+            pauseSharedIntent.setClass(getApplicationContext(), net.wigle.wigleandroid.listener.ScanControlReceiver.class);
+            final PendingIntent pauseIntent = PendingIntent.getBroadcast(MainActivity.getMainActivity(), 0, pauseSharedIntent ,PendingIntent.FLAG_CANCEL_CURRENT);
+
+            final Intent scanSharedIntent = new Intent();
+            scanSharedIntent.setAction("net.wigle.wigleandroid.SCAN");
+            scanSharedIntent.setClass(getApplicationContext(), net.wigle.wigleandroid.listener.ScanControlReceiver.class);
+            final PendingIntent scanIntent = PendingIntent.getBroadcast(MainActivity.getMainActivity(), 0, scanSharedIntent ,PendingIntent.FLAG_CANCEL_CURRENT);
+
+            final Intent uploadSharedIntent = new Intent();
+            uploadSharedIntent.setAction("net.wigle.wigleandroid.UPLOAD");
+            uploadSharedIntent.setClass(getApplicationContext(), net.wigle.wigleandroid.listener.UploadReceiver.class);
+            final PendingIntent uploadIntent = PendingIntent.getBroadcast(MainActivity.getMainActivity(), 0, uploadSharedIntent ,PendingIntent.FLAG_CANCEL_CURRENT);
+
+            Notification notification = null;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                notification = getNotification26(title, context, text, when, contentIntent, pauseIntent, scanIntent, uploadIntent);
+            } else {
+                @SuppressWarnings("deprecation")
+                final NotificationCompat.Builder builder = new NotificationCompat.Builder(context);
+                builder.setContentIntent(contentIntent);
+                builder.setNumber((int) ListFragment.lameStatic.newNets);
+                builder.setTicker(title);
+                builder.setContentTitle(title);
+                builder.setContentText(text);
+                builder.setWhen(when);
+                builder.setLargeIcon(largeIcon);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    builder.setSmallIcon(R.drawable.wiglewifi_small_white);
+                } else {
+                    builder.setSmallIcon(R.drawable.wiglewifi_small);
+                }
+                builder.setOngoing(true);
+                builder.setCategory("SERVICE");
+                builder.setPriority(NotificationCompat.PRIORITY_LOW);
+                builder.setVisibility(NotificationCompat.VISIBILITY_PUBLIC);
+                builder.addAction(android.R.drawable.ic_media_pause, "Pause", pauseIntent);
+                builder.addAction(android.R.drawable.ic_media_play, "Scan", scanIntent);
+                builder.addAction(android.R.drawable.ic_menu_upload, "Upload", uploadIntent);
+
+                try {
+                    //ALIBI: https://stackoverflow.com/questions/43123466/java-lang-nullpointerexception-attempt-to-invoke-interface-method-java-util-it
+                    notification = builder.build();
+                } catch (NullPointerException npe) {
+                    MainActivity.error("NPE trying to build notification. "+npe.getMessage());
+                }
+            }
+            if (null != notification) {
+                try {
+                    startForeground(NOTIFICATION_ID, notification);
+                } catch (Exception ex) {
+                    MainActivity.error("notification service error: ", ex);
+                }
+            }
+        }
+    }
+
+    private Notification getNotification26(final String title, final Context context, final String text,
+                                           final long when, final PendingIntent contentIntent,
+                                           final PendingIntent pauseIntent, final PendingIntent scanIntent,
+                                           final PendingIntent uploadIntent) {
+        // new notification channel
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            final NotificationManager notificationManager =
+                    (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (notificationManager == null) return null;
+
+            final NotificationChannel channel = new NotificationChannel(NOTIFICATION_CHANNEL_ID,
+                    title, NotificationManager.IMPORTANCE_LOW);
+            notificationManager.createNotificationChannel(channel);
+
+
+            // copied from above
+            final Notification.Builder builder = new Notification.Builder(context, NOTIFICATION_CHANNEL_ID);
             builder.setContentIntent(contentIntent);
-            builder.setNumber((int)ListFragment.lameStatic.newNets);
+            builder.setNumber((int) ListFragment.lameStatic.newNets);
             builder.setTicker(title);
             builder.setContentTitle(title);
             builder.setContentText(text);
             builder.setWhen(when);
             builder.setLargeIcon(largeIcon);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                builder.setSmallIcon(R.drawable.wiglewifi_small_white);
-            }
-            else {
-                builder.setSmallIcon(R.drawable.wiglewifi_small);
-            }
+            builder.setSmallIcon(R.drawable.wiglewifi_small_white);
             builder.setOngoing(true);
             builder.setCategory("SERVICE");
-            builder.setPriority(NotificationCompat.PRIORITY_LOW);
-            builder.setVisibility(NotificationCompat.VISIBILITY_PUBLIC);
+            builder.setVisibility(Notification.VISIBILITY_PUBLIC);
+            builder.setColorized(true);
+            // WiGLE Blue builder.setColor(6005486);
+            builder.setColor(1973790);
 
-            final Uri uri = Uri.EMPTY;
-            final Intent pauseSharedIntent = new Intent(Intent.ACTION_DELETE, uri, this, ShareActivity.class );
-            final PendingIntent pauseIntent = PendingIntent.getActivity( this, 0, pauseSharedIntent, 0 );
-            builder.addAction(R.drawable.wiglewifi_small_black_white, "Pause", pauseIntent);
+            //TODO: figure out how to update notification actions on exec, then we can show relevant
+            if (MainActivity.isScanning(getApplicationContext())) {
+                Notification.Action pauseAction = new Notification.Action.Builder(android.R.drawable.ic_media_pause,"Pause", pauseIntent)
+                        .build();
+                builder.addAction(pauseAction);
+            } else {
+                Notification.Action scanAction = new Notification.Action.Builder(android.R.drawable.ic_media_play,"Scan", scanIntent)
+                        .build();
+                builder.addAction(scanAction);
+            }
+            Notification.Action ulAction = new Notification.Action.Builder(android.R.drawable.ic_menu_upload,"Upload", uploadIntent)
+                    .build();
+            builder.addAction(ulAction);
 
-            final Intent scanSharedIntent = new Intent(Intent.ACTION_INSERT, uri, this, ShareActivity.class );
-            final PendingIntent scanIntent = PendingIntent.getActivity( this, 0, scanSharedIntent, 0 );
-            builder.addAction(R.drawable.wiglewifi_small_black_white, "Scan", scanIntent);
-
-            // final Intent uploadSharedIntent = new Intent(Intent.ACTION_SYNC, uri, this, ShareActivity.class );
-            // final PendingIntent uploadIntent = PendingIntent.getActivity( this, 0, uploadSharedIntent, 0 );
-            // builder.addAction(R.drawable.wiglewifi_small_black_white, "Upload", uploadIntent);
-
-            final Notification notification = builder.build();
-            startForegroundCompat( NOTIFICATION_ID, notification );
+            return builder.build();
         }
+        return null;
     }
-
-    void invokeMethod(Method method, Object[] args) {
-        //noinspection TryWithIdenticalCatches
-        try {
-            method.invoke(this, args);
-        } catch (InvocationTargetException e) {
-            // Should not happen.
-            MainActivity.warn("Unable to invoke method", e);
-        } catch (IllegalAccessException e) {
-            // Should not happen.
-            MainActivity.warn("Unable to invoke method", e);
-        }
-    }
-
-    /**
-     * This is a wrapper around the new startForeground method, using the older
-     * APIs if it is not available.
-     */
-    private void startForegroundCompat(int id, Notification notification) {
-        // If we have the new startForeground API, then use it.
-        if (mStartForeground != null) {
-            mStartForegroundArgs[0] = id;
-            mStartForegroundArgs[1] = notification;
-            invokeMethod(mStartForeground, mStartForegroundArgs);
-            return;
-        }
-
-        // Fall back on the old API.
-        mSetForegroundArgs[0] = Boolean.TRUE;
-        invokeMethod(mSetForeground, mSetForegroundArgs);
-        notificationManager.notify(id, notification);
-    }
-
-    /**
-     * This is a wrapper around the new stopForeground method, using the older
-     * APIs if it is not available.
-     */
-    private void stopForegroundCompat(int id) {
-        // If we have the new stopForeground API, then use it.
-        if (mStopForeground != null) {
-            mStopForegroundArgs[0] = Boolean.TRUE;
-            invokeMethod(mStopForeground, mStopForegroundArgs);
-            return;
-        }
-
-        // Fall back on the old API.  Note to cancel BEFORE changing the
-        // foreground state, since we could be killed at that point.
-        notificationManager.cancel(id);
-        mSetForegroundArgs[0] = Boolean.FALSE;
-        invokeMethod(mSetForeground, mSetForegroundArgs);
-    }
-
 }

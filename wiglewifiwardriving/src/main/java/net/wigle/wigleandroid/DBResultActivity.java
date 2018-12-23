@@ -14,7 +14,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
 import android.support.v7.app.ActionBar;
-import android.support.v7.app.ActionBarActivity;
+import android.support.v7.app.AppCompatActivity;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.widget.ListView;
@@ -30,18 +30,20 @@ import com.google.android.gms.maps.model.CameraPosition;
 import com.google.android.gms.maps.model.LatLng;
 
 import net.wigle.wigleandroid.background.QueryThread;
+import net.wigle.wigleandroid.db.DatabaseHelper;
 import net.wigle.wigleandroid.model.ConcurrentLinkedHashMap;
 import net.wigle.wigleandroid.model.Network;
 import net.wigle.wigleandroid.model.QueryArgs;
+import net.wigle.wigleandroid.ui.SetNetworkListAdapter;
 
-public class DBResultActivity extends ActionBarActivity {
+public class DBResultActivity extends AppCompatActivity {
     private static final int MENU_RETURN = 12;
     private static final int MSG_QUERY_DONE = 2;
     private static final int LIMIT = 50;
 
     private static final int DEFAULT_ZOOM = 18;
 
-    private NetworkListAdapter listAdapter;
+    private SetNetworkListAdapter listAdapter;
     private MapView mapView;
     private MapRender mapRender;
     private final List<Network> resultList = new ArrayList<>();
@@ -86,7 +88,7 @@ public class DBResultActivity extends ActionBarActivity {
 
     private void setupList() {
         // not set by nonconfig retain
-        listAdapter = new NetworkListAdapter( getApplicationContext(), R.layout.row );
+        listAdapter = new SetNetworkListAdapter( getApplicationContext(), R.layout.row );
         final ListView listView = (ListView) findViewById( R.id.dblist );
         ListFragment.setupListAdapter( listView, MainActivity.getMainActivity(), listAdapter, true );
     }
@@ -271,20 +273,26 @@ public class DBResultActivity extends ActionBarActivity {
 
     @Override
     public void onDestroy() {
-        mapView.onDestroy();
+        if (mapView != null) {
+            mapView.onDestroy();
+        }
         super.onDestroy();
     }
 
     @Override
     public void onResume() {
         super.onResume();
-        mapView.onResume();
+        if (null != mapView) {
+            mapView.onResume();
+        }
     }
 
     @Override
     public void onPause() {
         super.onPause();
-        mapView.onPause();
+        if (mapView != null) {
+            mapView.onPause();
+        }
         if (mapRender != null) {
             // save memory
             mapRender.clear();
@@ -294,13 +302,17 @@ public class DBResultActivity extends ActionBarActivity {
     @Override
     public void onSaveInstanceState(final Bundle outState) {
         super.onSaveInstanceState(outState);
-        mapView.onSaveInstanceState(outState);
+        if (mapView != null) {
+            mapView.onSaveInstanceState(outState);
+        }
     }
 
     @Override
     public void onLowMemory() {
         super.onLowMemory();
-        mapView.onLowMemory();
+        if (mapView != null) {
+            mapView.onLowMemory();
+        }
     }
 
 

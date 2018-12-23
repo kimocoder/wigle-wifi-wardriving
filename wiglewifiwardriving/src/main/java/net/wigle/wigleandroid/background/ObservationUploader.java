@@ -10,21 +10,19 @@ import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
 import android.os.Bundle;
 import android.os.Environment;
+import android.preference.PreferenceManager;
 import android.support.v4.app.Fragment;
 import android.support.v4.app.FragmentActivity;
 import android.util.Base64;
 
-import net.wigle.wigleandroid.DBException;
-import net.wigle.wigleandroid.DatabaseHelper;
+import net.wigle.wigleandroid.db.DBException;
+import net.wigle.wigleandroid.db.DatabaseHelper;
 import net.wigle.wigleandroid.ListFragment;
 import net.wigle.wigleandroid.MainActivity;
 import net.wigle.wigleandroid.R;
 import net.wigle.wigleandroid.TokenAccess;
 import net.wigle.wigleandroid.WiGLEAuthException;
 import net.wigle.wigleandroid.model.Network;
-
-import org.json.JSONException;
-import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -38,6 +36,7 @@ import java.net.UnknownHostException;
 import java.nio.BufferOverflowException;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
+import java.nio.channels.ClosedByInterruptException;
 import java.nio.charset.Charset;
 import java.nio.charset.CharsetEncoder;
 import java.nio.charset.CodingErrorAction;
@@ -51,6 +50,8 @@ import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.zip.GZIPOutputStream;
+
+import javax.net.ssl.SSLException;
 
 /**
  * replacement file upload task
@@ -106,7 +107,9 @@ public class ObservationUploader extends AbstractProgressApiRequest {
         }
         finally {
             // tell the listener
-            listener.requestComplete(null, false);
+            if (listener != null) {
+                listener.requestComplete(null, false);
+            }
         }
 
     }
@@ -136,18 +139,25 @@ public class ObservationUploader extends AbstractProgressApiRequest {
     @Override
     public void startDownload(final Fragment fragment) throws WiGLEAuthException {
         // download token if needed
-        final SharedPreferences prefs = fragment.getActivity().getSharedPreferences(
-                ListFragment.SHARED_PREFS, 0);
-        final boolean beAnonymous = prefs.getBoolean(ListFragment.PREF_BE_ANONYMOUS, false);
-        final String authname = prefs.getString(ListFragment.PREF_AUTHNAME, null);
-        final String userName = prefs.getString(ListFragment.PREF_USERNAME, null);
-        final String userPass = prefs.getString(ListFragment.PREF_PASSWORD, null);
-        MainActivity.info("authname: " + authname);
-        if ((!beAnonymous) && (authname == null) && (userName != null) && (userPass != null)) {
-            MainActivity.info("No authname, going to request token");
-            downloadTokenAndStart(fragment);
+        SharedPreferences prefs;
+        if (null != fragment) {
+            prefs = fragment.getActivity().getSharedPreferences(
+                    ListFragment.SHARED_PREFS, 0);
         } else {
-            start();
+            prefs = PreferenceManager.getDefaultSharedPreferences(MainActivity.getMainActivity().getApplicationContext());
+        }
+        if (prefs != null) {
+            final boolean beAnonymous = prefs.getBoolean(ListFragment.PREF_BE_ANONYMOUS, false);
+            final String authname = prefs.getString(ListFragment.PREF_AUTHNAME, null);
+            final String userName = prefs.getString(ListFragment.PREF_USERNAME, null);
+            final String userPass = prefs.getString(ListFragment.PREF_PASSWORD, null);
+            MainActivity.info("authname: " + authname);
+            if ((!beAnonymous) && (authname == null) && (userName != null) && (userPass != null)) {
+                MainActivity.info("No authname, going to request token");
+                downloadTokenAndStart(fragment);
+            } else {
+                start();
+            }
         }
     }
 
@@ -185,9 +195,6 @@ public class ObservationUploader extends AbstractProgressApiRequest {
             }
             final String userName = prefs.getString(ListFragment.PREF_USERNAME, null);
             final String token = TokenAccess.getApiToken(prefs);
-            final String encoded = (null != token && null != authname) ?
-                    Base64.encodeToString((authname + ":" + token).getBytes("UTF-8"),
-                        Base64.NO_WRAP) : null;
 
             // don't upload empty files
             if ( countStats.lineCount == 0 && ! "ark-mobile".equals(userName) &&
@@ -199,46 +206,18 @@ public class ObservationUploader extends AbstractProgressApiRequest {
             // show on the UI
             sendBundledMessage( Status.UPLOADING.ordinal(), bundle );
 
-            long filesize = file != null ? file.length() : 0L;
-            if ( filesize <= 0 ) {
-                // find out how big the gzip'd file became
-                final FileInputStream fin = context.openFileInput(filename);
-                filesize = fin.available();
-                fin.close();
-                MainActivity.info("filesize: " + filesize);
-            }
-            if ( filesize <= 0 ) {
-                filesize = countStats.byteCount; // as an upper bound
-            }
-
             // send file
             final boolean hasSD = MainActivity.hasSD();
-            @SuppressWarnings("ConstantConditions")
-            final FileInputStream fis = hasSD ? new FileInputStream( file )
-                    : context.openFileInput( filename );
+
+            final String absolutePath = hasSD ? file.getAbsolutePath() : context.getFileStreamPath(filename).getAbsolutePath();
+
             MainActivity.info("authname: " + authname);
 
             if (beAnonymous) {
                 MainActivity.info("anonymous upload");
             }
 
-            // Cannot set request property after connection is made
-            PreConnectConfigurator preConnectConfigurator = new PreConnectConfigurator() {
-                    @Override
-                    public void configure(HttpURLConnection connection) {
-                    if (!beAnonymous) {
-                        if (null != encoded && !encoded.isEmpty()) {
-                            connection.setRequestProperty("Authorization", "Basic " + encoded);
-                        }
-                    }
-                }
-                          };
-
-            final String response = HttpFileUploader.upload(
-                    MainActivity.FILE_POST_URL, filename, "file", fis,
-                    params, preConnectConfigurator, getHandler(), filesize );
-
-            // as upload() is currently written: response can never be null. leave checks inplace anyhow. -uhtu
+            final String response = OkFileUploader.upload(MainActivity.FILE_POST_URL, absolutePath, "file", params, authname, token, getHandler());
 
             if ( ! prefs.getBoolean(ListFragment.PREF_DONATE, false) ) {
                 if ( response != null && response.indexOf("donate=Y") > 0 ) {
@@ -273,31 +252,19 @@ public class ObservationUploader extends AbstractProgressApiRequest {
                 status = Status.FAIL;
             }
         } catch ( final InterruptedException ex ) {
+            MainActivity.info("ObservationUploader interrupted");
             throw ex;
-        } catch ( final FileNotFoundException ex ) {
-            ex.printStackTrace();
-            MainActivity.error( "file problem: " + ex, ex );
-            MainActivity.writeError( this, ex, context, "Has data connection: " + hasDataConnection(context) );
-            status = Status.EXCEPTION;
-            bundle.putString( BackgroundGuiHandler.ERROR, "file problem: " + ex );
-        } catch (ConnectException ex) {
-            ex.printStackTrace();
+
+        } catch (final ClosedByInterruptException | UnknownHostException | ConnectException | FileNotFoundException ex) {
             MainActivity.error( "connection problem: " + ex, ex );
-            MainActivity.writeError( this, ex, context, "Has data connection: " + hasDataConnection(context) );
-            status = Status.EXCEPTION;
-            bundle.putString( BackgroundGuiHandler.ERROR, "connect problem: " + ex );
-            if (! hasDataConnection(context)) {
-                bundle.putString( BackgroundGuiHandler.ERROR, context.getString(R.string.no_data_conn) + ex);
-            }
-        } catch (UnknownHostException ex) {
             ex.printStackTrace();
-            MainActivity.error( "DNS problem: " + ex, ex );
-            MainActivity.writeError( this, ex, context, "Has data connection: " + hasDataConnection(context) );
             status = Status.EXCEPTION;
-            bundle.putString( BackgroundGuiHandler.ERROR, "dns problem: " + ex );
-            if (! hasDataConnection(context)) {
-                bundle.putString( BackgroundGuiHandler.ERROR, context.getString(R.string.no_data_conn) + ex);
-            }
+            bundle.putString( BackgroundGuiHandler.ERROR, context.getString(R.string.no_wigle_conn) );
+        } catch (final SSLException ex) {
+            MainActivity.error( "security problem: " + ex, ex );
+            ex.printStackTrace();
+            status = Status.EXCEPTION;
+            bundle.putString( BackgroundGuiHandler.ERROR, context.getString(R.string.no_secure_wigle_conn) );
         } catch ( final IOException ex ) {
             ex.printStackTrace();
             MainActivity.error( "io problem: " + ex, ex );
@@ -687,9 +654,8 @@ public class ObservationUploader extends AbstractProgressApiRequest {
             bundle.putString( BackgroundGuiHandler.FILENAME, filename );
         }
 
-        @SuppressWarnings({ "deprecation", "resource" })
         final FileOutputStream rawFos = hasSD ? new FileOutputStream( file )
-                : context.openFileOutput( filename, Context.MODE_WORLD_READABLE );
+                    : context.openFileOutput( filename, Context.MODE_PRIVATE );
 
         final GZIPOutputStream fos = new GZIPOutputStream( rawFos );
         fileFilename[0] = file;

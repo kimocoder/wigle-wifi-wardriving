@@ -3,10 +3,10 @@ package net.wigle.wigleandroid;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
-import android.app.AlarmManager;
 import android.app.AlertDialog;
 import android.app.Dialog;
-import android.app.PendingIntent;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.DialogInterface;
@@ -19,6 +19,7 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.content.res.Resources;
+import android.graphics.Color;
 import android.location.LocationManager;
 import android.location.LocationProvider;
 import android.media.AudioManager;
@@ -30,6 +31,7 @@ import android.net.wifi.WifiManager.WifiLock;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
 import android.os.IBinder;
 import android.os.PowerManager;
 import android.provider.Settings;
@@ -66,14 +68,21 @@ import android.widget.Toast;
 
 import com.google.android.gms.common.ConnectionResult;
 import com.google.android.gms.common.GooglePlayServicesUtil;
+import com.google.gson.Gson;
 
 import net.wigle.wigleandroid.background.ObservationUploader;
+import net.wigle.wigleandroid.db.DatabaseHelper;
+import net.wigle.wigleandroid.db.MxcDatabaseHelper;
 import net.wigle.wigleandroid.listener.BatteryLevelReceiver;
+import net.wigle.wigleandroid.listener.BluetoothReceiver;
 import net.wigle.wigleandroid.listener.GPSListener;
 import net.wigle.wigleandroid.listener.PhoneState;
+import net.wigle.wigleandroid.listener.PrefCheckboxListener;
 import net.wigle.wigleandroid.listener.WifiReceiver;
 import net.wigle.wigleandroid.model.ConcurrentLinkedHashMap;
 import net.wigle.wigleandroid.model.Network;
+import net.wigle.wigleandroid.ui.SetNetworkListAdapter;
+import net.wigle.wigleandroid.ui.WiGLEToast;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -92,15 +101,18 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.prefs.Preferences;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static android.location.LocationManager.GPS_PROVIDER;
 
 public final class MainActivity extends AppCompatActivity {
     //*** state that is retained ***
     public static class State {
+        public MxcDatabaseHelper mxcDbHelper;
         DatabaseHelper dbHelper;
         ServiceConnection serviceConnection;
+        WigleService wigleService;
         AtomicBoolean finishing;
         AtomicBoolean transferring;
         MediaPlayer soundPop;
@@ -108,6 +120,7 @@ public final class MainActivity extends AppCompatActivity {
         WifiLock wifiLock;
         GPSListener gpsListener;
         WifiReceiver wifiReceiver;
+        BluetoothReceiver bluetoothReceiver;
         NumberFormat numberFormat0;
         NumberFormat numberFormat1;
         NumberFormat numberFormat8;
@@ -115,7 +128,7 @@ public final class MainActivity extends AppCompatActivity {
         boolean inEmulator;
         PhoneState phoneState;
         ObservationUploader observationUploader;
-        NetworkListAdapter listAdapter;
+        SetNetworkListAdapter listAdapter;
         String previousStatus;
         int currentTab;
         private final Fragment[] fragList = new Fragment[11];
@@ -123,6 +136,8 @@ public final class MainActivity extends AppCompatActivity {
         private PowerManager.WakeLock wakeLock;
         private int logPointer = 0;
         private String[] logs = new String[20];
+        Matcher bssidLogExclusions;
+        Matcher bssidDisplayExclusions;
     }
 
     private State state;
@@ -140,6 +155,9 @@ public final class MainActivity extends AppCompatActivity {
     public static final String USER_STATS_URL = "https://api.wigle.net/api/v2/stats/user";
     public static final String OBSERVED_URL = "https://api.wigle.net/api/v2/network/mine";
     public static final String FILE_POST_URL = "https://api.wigle.net/api/v2/file/upload";
+    public static final String KML_TRANSID_URL_STEM = "https://api.wigle.net/api/v2/file/kml/";
+    // registration web view
+    public static final String REG_URL = "https://wigle.net/register";
 
     private static final String LOG_TAG = "wigle";
     public static final String ENCODING = "ISO-8859-1";
@@ -147,7 +165,7 @@ public final class MainActivity extends AppCompatActivity {
 
     static final String ERROR_STACK_FILENAME = "errorstack";
     static final String ERROR_REPORT_DO_EMAIL = "doEmail";
-    static final String ERROR_REPORT_DIALOG = "doDialog";
+    public static final String ERROR_REPORT_DIALOG = "doDialog";
 
     public static final long DEFAULT_SPEECH_PERIOD = 60L;
     public static final long DEFAULT_RESET_WIFI_PERIOD = 90000L;
@@ -155,7 +173,18 @@ public final class MainActivity extends AppCompatActivity {
     public static final long SCAN_STILL_DEFAULT = 3000L;
     public static final long SCAN_DEFAULT = 2000L;
     public static final long SCAN_FAST_DEFAULT = 1000L;
+    public static final long SCAN_P_DEFAULT = 30000L;
     public static final long DEFAULT_BATTERY_KILL_PERCENT = 2L;
+    private static final long FINISH_TIME_MILLIS = 10L;
+    private static final long DESTROY_FINISH_MILLIS = 3000L; // if someone force kills, how long until service finishes
+
+    public static final String ACTION_END = "net.wigle.wigleandroid.END";
+    public static final String ACTION_UPLOAD = "net.wigle.wigleandroid.UPLOAD";
+    public static final String ACTION_PAUSE = "net.wigle.wigleandroid.PAUSE";
+    public static final String ACTION_SCAN = "net.wigle.wigleandroid.SCAN";
+
+    public static final boolean DEBUG_CELL_DATA = false;
+    public static final boolean DEBUG_BLUETOOTH_DATA = false;
 
     private static MainActivity mainActivity;
     private static ListFragment listActivity;
@@ -187,6 +216,7 @@ public final class MainActivity extends AppCompatActivity {
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         info("MAIN onCreate. state:  " + state);
+
         // set language
         setLocale(this);
         setContentView(R.layout.main);
@@ -214,6 +244,9 @@ public final class MainActivity extends AppCompatActivity {
         fm.executePendingTransactions();
         StateFragment stateFragment = (StateFragment) fm.findFragmentByTag(STATE_FRAGMENT_TAG);
 
+        final SharedPreferences prefs = getSharedPreferences(ListFragment.SHARED_PREFS, 0);
+        pieScanningSettings(prefs);
+
         if (stateFragment != null && stateFragment.getState() != null) {
             info("MAIN: using retained stateFragment state");
             // pry an orientation change, which calls destroy, but we get this from retained fragment
@@ -236,10 +269,12 @@ public final class MainActivity extends AppCompatActivity {
             stateFragment.setState(state);
             fm.beginTransaction().add(stateFragment, STATE_FRAGMENT_TAG).commit();
             // new run, reset
-            final SharedPreferences prefs = getSharedPreferences(ListFragment.SHARED_PREFS, 0);
             final float prevRun = prefs.getFloat(ListFragment.PREF_DISTANCE_RUN, 0f);
             Editor edit = prefs.edit();
             edit.putFloat(ListFragment.PREF_DISTANCE_RUN, 0f);
+            edit.putLong(ListFragment.PREF_STARTTIME_RUN, System.currentTimeMillis());
+            edit.putLong(ListFragment.PREF_STARTTIME_CURRENT_SCAN, System.currentTimeMillis());
+            edit.putLong(ListFragment.PREF_CUMULATIVE_SCANTIME_RUN, 0L);
             edit.putFloat(ListFragment.PREF_DISTANCE_PREV_RUN, prevRun);
             edit.apply();
         }
@@ -280,6 +315,7 @@ public final class MainActivity extends AppCompatActivity {
             state.numberFormat8 = NumberFormat.getNumberInstance(Locale.US);
             if (state.numberFormat8 instanceof DecimalFormat) {
                 state.numberFormat8.setMaximumFractionDigits(8);
+                state.numberFormat8.setMinimumFractionDigits(8);
             }
         }
 
@@ -291,6 +327,10 @@ public final class MainActivity extends AppCompatActivity {
         setupBattery();
         info("setupSound");
         setupSound();
+        info("setupActivationDialog");
+        setupActivationDialog();
+        info("setupBluetooth");
+        setupBluetooth();
         info("setupWifi");
         setupWifi();
         info("setupLocation"); // must be after setupWifi
@@ -299,6 +339,16 @@ public final class MainActivity extends AppCompatActivity {
         if (savedInstanceState == null) {
             setupFragments();
         }
+        setupFilters(prefs);
+
+        //TODO: if we can determine whether DB needs updating, we can avoid copying every time
+        //if (!state.mxcDbHelper.isPresent()) {
+        try {
+            state.mxcDbHelper.implantMxcDatabase();
+        } catch (IOException ex) {
+            MainActivity.error("unable to implant mcc/mnc db", ex);
+        }
+        //}
 
         // rksh 20160202 - api/authuser secure preferences storage
         checkInitKeystore();
@@ -306,6 +356,23 @@ public final class MainActivity extends AppCompatActivity {
         // show the list by default
         selectFragment(state.currentTab);
         info("onCreate setup complete");
+    }
+
+    private void pieScanningSettings(final SharedPreferences prefs) {
+        if (Build.VERSION.SDK_INT == 28) {
+            for (final String key : Arrays.asList(ListFragment.PREF_SCAN_PERIOD_STILL,
+                    ListFragment.PREF_SCAN_PERIOD, ListFragment.PREF_SCAN_PERIOD_FAST)) {
+                pieScanSet(prefs, key);
+            }
+        }
+    }
+
+    @SuppressLint("ApplySharedPref")
+    private void pieScanSet(final SharedPreferences prefs, final String key) {
+        if (-1 == prefs.getLong(key, -1)) {
+            info("Setting 30 second scan for " + key + " due to broken Android Pie");
+            prefs.edit().putLong(key, SCAN_P_DEFAULT).commit();
+        }
     }
 
     /**
@@ -338,6 +405,7 @@ public final class MainActivity extends AppCompatActivity {
                 permissionsNeeded.add(mainActivity.getString(R.string.cell_permission));
             }
             addPermission(permissionsList, Manifest.permission.WRITE_EXTERNAL_STORAGE);
+            addPermission(permissionsList, Manifest.permission.BLUETOOTH);
 
             if (!permissionsList.isEmpty()) {
                 // The permission is NOT already granted.
@@ -353,11 +421,7 @@ public final class MainActivity extends AppCompatActivity {
 
                 if (permissionsList.contains(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
                     message = mainActivity.getString(R.string.allow_storage);
-                }
-
-                // Show our own UI to explain to the user why we need to read the contacts
-                // before actually requesting the permission and showing the default UI
-                Toast.makeText(mainActivity, message, Toast.LENGTH_LONG).show();*/
+                } */
 
                 MainActivity.info("no permission for " + permissionsNeeded);
 
@@ -402,13 +466,8 @@ public final class MainActivity extends AppCompatActivity {
 
                 if (restart) {
                     // restart the app now that we can talk to the database
-                    Toast.makeText(mainActivity, R.string.restart, Toast.LENGTH_LONG).show();
-
-                    Intent i = getBaseContext().getPackageManager()
-                            .getLaunchIntentForPackage(getBaseContext().getPackageName());
-                    i.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                    finish();
-                    startActivity(i);
+                    info("Restarting to pick up storage permission");
+                    finishSoon(FINISH_TIME_MILLIS, true);
                 }
                 return;
             }
@@ -461,8 +520,15 @@ public final class MainActivity extends AppCompatActivity {
                 } else {
                     view = convertView;
                 }
+
                 final TextView text = (TextView) view.findViewById(R.id.drawer_list_text);
                 text.setText(menuTitles[position]);
+                //If that's the Exit button, set the background to red
+                if(position == EXIT_TAB_POS) {
+                    view.setBackgroundColor(Color.argb(200,70,0,0));
+                }else{
+                    view.setBackgroundColor(0);
+                }
                 final ImageView image = (ImageView) view.findViewById(R.id.drawer_list_icon);
                 image.setImageResource(menuIcons[position]);
 
@@ -516,7 +582,7 @@ public final class MainActivity extends AppCompatActivity {
      */
     public void selectFragment(int position) {
         if (position == EXIT_TAB_POS) {
-            finish();
+            finishSoon();
             return;
         }
 
@@ -545,7 +611,6 @@ public final class MainActivity extends AppCompatActivity {
         } catch (final NullPointerException | IllegalStateException ex) {
             final String message = "exception in fragment switch: " + ex;
             error(message, ex);
-            Toast.makeText(this, message, Toast.LENGTH_LONG).show();
         }
 
         // Highlight the selected item, update the title, and close the drawer
@@ -624,27 +689,6 @@ public final class MainActivity extends AppCompatActivity {
         state.fragList[SETTINGS_TAB_POS] = settings;
     }
 
-    private void handleIntent() {
-        // Get the intent that started this activity
-        final Intent intent = getIntent();
-
-        // Figure out what to do based on the intent type
-        MainActivity.info("ShareActivity intent type: " + intent.getAction());
-        switch (intent.getAction()) {
-            case Intent.ACTION_INSERT:
-                MainActivity.getMainActivity().handleScanChange(true);
-                break;
-            case Intent.ACTION_DELETE:
-                MainActivity.getMainActivity().handleScanChange(false);
-                break;
-            case Intent.ACTION_SYNC:
-                MainActivity.getMainActivity().doUpload();
-                break;
-            default:
-                MainActivity.info("Unhandled intent action: " + intent.getAction());
-        }
-    }
-
     @Override
     public boolean onMenuOpened(int featureId, Menu menu) {
         if (featureId == Window.FEATURE_ACTION_BAR && menu != null) {
@@ -719,22 +763,74 @@ public final class MainActivity extends AppCompatActivity {
             return frag;
         }
 
+        /**
+         * alternate instantiation with a prefs-back checkbox inline - String prefs only
+         * @param message
+         * @param checkboxLabel
+         * @param tabPos
+         * @param dialogId
+         * @return
+         */
+        public static ConfirmationDialog newInstance(final String message, final String checkboxLabel,
+                                                     final String persistPrefKey,
+                                                     final String persistPrefAgreeValue,
+                                                     final String persistPrefDisagreeValue,
+                                                     final int tabPos,
+                                                     final int dialogId) {
+            final ConfirmationDialog frag = new ConfirmationDialog();
+            Bundle args = new Bundle();
+            args.putString("message", message);
+            args.putInt("tabPos", tabPos);
+            args.putInt("dialogId", dialogId);
+            args.putString("checkboxLabel", checkboxLabel);
+            args.putString("persistPref", persistPrefKey);
+            args.putString("persistPrefAgreeValue", persistPrefAgreeValue);
+            args.putString("persistPrefDisagreeValue", persistPrefDisagreeValue);
+            frag.setArguments(args);
+            return frag;
+        }
+
         @NonNull
         @Override
         public Dialog onCreateDialog(Bundle savedInstanceState) {
             final Activity activity = getActivity();
             final AlertDialog.Builder builder = new AlertDialog.Builder(activity);
             builder.setCancelable(true);
-            builder.setTitle("Confirmation");
+            builder.setTitle("Confirmation"); //TODO: literal string
+            final String checkboxLabel = getArguments().containsKey("checkboxLabel") ? getArguments().getString("checkboxLabel"): null;
+            if (null != checkboxLabel) {
+                View checkBoxView = View.inflate(activity, R.layout.checkbox, null);
+                CheckBox checkBox = (CheckBox) checkBoxView.findViewById(R.id.checkbox);
+                checkBox.setText(checkboxLabel);
+                builder.setView(checkBoxView);
+            }
+            final String persistPrefKey = getArguments().containsKey("persistPref") ?
+                    getArguments().getString("persistPref"): null;
+            final String persistPrefAgreeValue = getArguments().containsKey("persistPrefAgreeValue") ?
+                    getArguments().getString("persistPrefAgreeValue"): null;
+            final String persistPrefDisagreeValue = getArguments().containsKey("persistPrefDisagreeValue") ?
+                    getArguments().getString("persistPrefDisagreeValue"): null;
+
             builder.setMessage(getArguments().getString("message"));
             final int tabPos = getArguments().getInt("tabPos");
             final int dialogId = getArguments().getInt("dialogId");
+            final SharedPreferences prefs = activity.getSharedPreferences( ListFragment.SHARED_PREFS, 0 );
+
+
             final AlertDialog ad = builder.create();
             // ok
             ad.setButton(DialogInterface.BUTTON_POSITIVE, activity.getString(R.string.ok), new DialogInterface.OnClickListener() {
                 @Override
                 public void onClick(final DialogInterface dialog, final int which) {
                     try {
+                        if (null != persistPrefKey) {
+                            CheckBox checkBox = (CheckBox) ((AlertDialog) dialog).findViewById(R.id.checkbox);
+                            if (checkBox.isChecked()) {
+                                final SharedPreferences.Editor editor = prefs.edit();
+                                editor.putString(persistPrefKey, persistPrefAgreeValue);
+                                editor.apply();
+                            }
+                        }
                         dialog.dismiss();
                         final Activity activity = getActivity();
                         if (activity == null) {
@@ -760,6 +856,14 @@ public final class MainActivity extends AppCompatActivity {
                 @Override
                 public void onClick(final DialogInterface dialog, final int which) {
                     try {
+                        if (null != persistPrefKey) {
+                            CheckBox checkBox = (CheckBox) ((AlertDialog) dialog).findViewById(R.id.checkbox);
+                            if (checkBox.isChecked()) {
+                                final SharedPreferences.Editor editor = prefs.edit();
+                                editor.putString(persistPrefKey, persistPrefDisagreeValue);
+                                editor.apply();
+                            }
+                        }
                         dialog.dismiss();
                     } catch (Exception ex) {
                         // guess it wasn't there anyways
@@ -785,7 +889,26 @@ public final class MainActivity extends AppCompatActivity {
         } catch (final IllegalStateException ex) {
             final String errorMessage = "Exception trying to show dialog: " + ex;
             MainActivity.error(errorMessage, ex);
-            Toast.makeText(activity, errorMessage, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    static void createCheckboxConfirmation(final FragmentActivity activity, final String message,
+                                           final String checkboxLabel, final String persistPrefKey,
+                                           final String persistPrefAgreeValue,
+                                           final String persistPrefDisagreeValue,
+                                   final int tabPos, final int dialogId) {
+        try {
+            final FragmentManager fm = activity.getSupportFragmentManager();
+            final ConfirmationDialog dialog = ConfirmationDialog.newInstance(message, checkboxLabel,
+                    persistPrefKey, persistPrefAgreeValue, persistPrefDisagreeValue, tabPos, dialogId);
+            final String tag = tabPos + "-" + dialogId + "-" + activity.getClass().getSimpleName();
+            info("tag: " + tag + " fm: " + fm);
+            dialog.show(fm, tag);
+        } catch (WindowManager.BadTokenException ex) {
+            MainActivity.info("exception showing dialog, view probably changed: " + ex, ex);
+        } catch (final IllegalStateException ex) {
+            final String errorMessage = "Exception trying to show dialog: " + ex;
+            MainActivity.error(errorMessage, ex);
         }
     }
 
@@ -796,6 +919,10 @@ public final class MainActivity extends AppCompatActivity {
             //state.dbHelper.checkDB();
             state.dbHelper.start();
             ListFragment.lameStatic.dbHelper = state.dbHelper;
+        }
+        if (state.mxcDbHelper == null) {
+            state.mxcDbHelper = new MxcDatabaseHelper(getApplicationContext());
+            //state.mxcDbHelper.start();
         }
     }
 
@@ -819,9 +946,14 @@ public final class MainActivity extends AppCompatActivity {
         return checkbox;
     }
 
-    public static CheckBox prefBackedCheckBox(final Fragment fragment, final View view, final int id,
+    public static CheckBox prefBackedCheckBox(final Activity activity, final View view, final int id,
                                               final String pref, final boolean def) {
-        final SharedPreferences prefs = fragment.getActivity().getSharedPreferences(ListFragment.SHARED_PREFS, 0);
+        return prefBackedCheckBox(activity, view, id, pref, def, null);
+    }
+
+    public static CheckBox prefBackedCheckBox(final Activity activity, final View view, final int id,
+                                              final String pref, final boolean def, final PrefCheckboxListener listener) {
+        final SharedPreferences prefs = activity.getSharedPreferences(ListFragment.SHARED_PREFS, 0);
         final Editor editor = prefs.edit();
         final CheckBox checkbox = prefSetCheckBox(prefs, view, id, pref, def);
         checkbox.setOnCheckedChangeListener(new OnCheckedChangeListener() {
@@ -829,6 +961,9 @@ public final class MainActivity extends AppCompatActivity {
             public void onCheckedChanged(final CompoundButton buttonView, final boolean isChecked) {
                 editor.putBoolean(pref, isChecked);
                 editor.apply();
+                if (null != listener) {
+                    listener.preferenceSet(isChecked);
+                }
             }
         });
 
@@ -875,7 +1010,7 @@ public final class MainActivity extends AppCompatActivity {
         return MainActivity.safeFilePath(Environment.getExternalStorageDirectory()) + "/wiglewifi/";
     }
 
-    public static FileOutputStream createFile(final Context context, final String filename) throws IOException {
+    public static FileOutputStream createFile(final Context context, final String filename, final boolean isCache) throws IOException {
         final String filepath = getSDPath();
         final File path = new File(filepath);
 
@@ -893,10 +1028,12 @@ public final class MainActivity extends AppCompatActivity {
             }
 
             return new FileOutputStream(file);
+        } else if (isCache) {
+            File file = File.createTempFile(filename, null, context.getCacheDir());
+            return new FileOutputStream(file);
         }
 
-        //noinspection deprecation
-        return context.openFileOutput(filename, Context.MODE_WORLD_READABLE);
+        return context.openFileOutput(filename, Context.MODE_PRIVATE);
     }
 
     @Override
@@ -917,6 +1054,24 @@ public final class MainActivity extends AppCompatActivity {
         } catch (final IllegalArgumentException ex) {
             info("wifiReceiver not registered: " + ex);
         }
+
+        if (state.tts != null) state.tts.shutdown();
+
+        //TODO: redundant with endBluetooth?
+        final BluetoothAdapter bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
+        if (bluetoothAdapter != null && bluetoothAdapter.isDiscovering()) {
+            bluetoothAdapter.cancelDiscovery();
+        } try {
+            info("unregister bluetoothReceiver");
+            unregisterReceiver( state.bluetoothReceiver );
+        } catch ( final IllegalArgumentException ex ) {
+            info( "bluetoothReceiver not registered: " + ex );
+        }
+        if (state.bluetoothReceiver != null) {
+            state.bluetoothReceiver.stopScanning();
+        }
+
+        finishSoon(DESTROY_FINISH_MILLIS, false);
     }
 
     @Override
@@ -991,6 +1146,7 @@ public final class MainActivity extends AppCompatActivity {
             intent.putExtra( MainActivity.ERROR_REPORT_DO_EMAIL, true );
             startActivity(intent);
         }
+
         super.onStart();
 
     }
@@ -1034,7 +1190,15 @@ public final class MainActivity extends AppCompatActivity {
         MainActivity.info("current lang: " + current + " new lang: " + lang);
         Locale newLocale = null;
         if (!"".equals(lang) && !current.equals(lang)) {
-            newLocale = new Locale(lang);
+            if (lang.contains("-r")) {
+                String[] parts = lang.split("-r");
+                MainActivity.info("\tlang: "+parts[0]+" country: "+parts[1]);
+                newLocale = new Locale(parts[0], parts[1]);
+            } else {
+                MainActivity.info("\tlang: "+lang);
+                newLocale = new Locale(lang);
+
+            }
         } else if ("".equals(lang) && ORIG_LOCALE != null && !current.equals(ORIG_LOCALE.getLanguage())) {
             newLocale = ORIG_LOCALE;
         }
@@ -1091,7 +1255,6 @@ public final class MainActivity extends AppCompatActivity {
      * @param name    the file name to write out
      * @return the uri of a file containing resid's resource
      */
-    @SuppressWarnings("deprecation")
     private static Uri resToFile(final Context context, final int resid, final String name) throws IOException {
         // throw it in our bag of fun.
         String openString = name;
@@ -1122,7 +1285,8 @@ public final class MainActivity extends AppCompatActivity {
                     fos = new FileOutputStream(f);
                 } else {
                     // XXX: should this be using openString instead? baroo?
-                    fos = context.openFileOutput(name, Context.MODE_WORLD_READABLE);
+                    fos = context.openFileOutput(name, Context.MODE_PRIVATE);
+
                 }
 
                 final byte[] buff = new byte[1024];
@@ -1418,6 +1582,85 @@ public final class MainActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * Instantiate both both BSSID matchers - inital load
+     * @param prefs
+     */
+    private void setupFilters(final SharedPreferences prefs) {
+        if (null != state) {
+            state.bssidDisplayExclusions = generateBssidFilterMatcher(prefs, ListFragment.PREF_EXCLUDE_DISPLAY_ADDRS);
+            state.bssidLogExclusions = generateBssidFilterMatcher(prefs, ListFragment.PREF_EXCLUDE_LOG_ADDRS);
+            //TODO: port SSID matcher over as well?
+        }
+    }
+
+    /**
+     * Trigger recreation of BSSID address filter from prefs
+     * @param addressKey
+     */
+    public void updateAddressFilter(final String addressKey) {
+        if (null != state) {
+            final SharedPreferences prefs = this.getSharedPreferences(ListFragment.SHARED_PREFS, 0);
+            if (ListFragment.PREF_EXCLUDE_DISPLAY_ADDRS.equals(addressKey)) {
+                state.bssidDisplayExclusions = generateBssidFilterMatcher(prefs, ListFragment.PREF_EXCLUDE_DISPLAY_ADDRS);
+            } else if (ListFragment.PREF_EXCLUDE_LOG_ADDRS.equals(addressKey)) {
+                state.bssidLogExclusions = generateBssidFilterMatcher(prefs, ListFragment.PREF_EXCLUDE_LOG_ADDRS);
+            }
+        }
+    }
+
+    /**
+     * Accessor for state BSSID matchers
+     * @param addressKey
+     * @return
+     */
+    public Matcher getBssidFilterMatcher(final String addressKey) {
+        if (null != state) {
+            if (ListFragment.PREF_EXCLUDE_DISPLAY_ADDRS.equals(addressKey)) {
+                return state.bssidDisplayExclusions;
+            } else if (ListFragment.PREF_EXCLUDE_LOG_ADDRS.equals(addressKey)) {
+                return state.bssidLogExclusions;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Build a BSSID matcher from preferences for the supplied key
+     * @param prefs
+     * @param addressKey
+     * @return
+     */
+    private Matcher generateBssidFilterMatcher( final SharedPreferences prefs,  final String addressKey) {
+        Gson gson = new Gson();
+        Matcher matcher = null;
+        final String f = prefs.getString( ListFragment.PREF_EXCLUDE_DISPLAY_ADDRS, "");
+        String[] values = gson.fromJson(prefs.getString(addressKey, "[]"), String[].class);
+        if(values.length>0) {
+            StringBuffer sb = new StringBuffer("^(");
+            boolean first = true;
+            for (String value: values) {
+
+                if (first) {
+                    first = false;
+                } else {
+                    sb.append("|");
+                }
+                sb.append(value);
+                if (value.length() == 17) {
+                    sb.append("$");
+                }
+            }
+            sb.append(")");
+            //TODO: debug
+            MainActivity.info("building regex from: "+sb.toString());
+            Pattern pattern = Pattern.compile( sb.toString(), Pattern.CASE_INSENSITIVE );
+            matcher = pattern.matcher( "" );
+        }
+
+        return matcher;
+    }
+
     public boolean inEmulator() {
         return state.inEmulator;
     }
@@ -1480,14 +1723,51 @@ public final class MainActivity extends AppCompatActivity {
         }
     }
 
+    private void setupActivationDialog() {
+        final boolean willActivateBt = canBtBeActivated();
+        final boolean willActivateWifi = canWifiBeActivated();
+        final SharedPreferences prefs = getSharedPreferences( ListFragment.SHARED_PREFS, 0 );
+        final boolean useBt = (prefs.getBoolean(ListFragment.PREF_SCAN_BT, false));
+
+        if ((willActivateBt && useBt) || willActivateWifi) {
+
+            String activationMessages = "";
+
+            if (willActivateBt && useBt) {
+                activationMessages += getString(R.string.turn_on_bt);
+                if (willActivateWifi) {
+                    activationMessages += "\n";
+                }
+            }
+
+            if (willActivateWifi) {
+                activationMessages += getString(R.string.turn_on_wifi);
+            }
+            // tell user, cuz this takes a little while
+            if (!isFinishing()) {
+                WiGLEToast.showOverActivity(this, R.string.app_name, activationMessages, Toast.LENGTH_LONG);
+            }
+        }
+    }
+
+    private boolean canWifiBeActivated() {
+        final WifiManager wifiManager = (WifiManager) this.getApplicationContext().
+                getSystemService(Context.WIFI_SERVICE);
+        if (null == wifiManager) {
+            return false;
+        }
+        if (!wifiManager.isWifiEnabled() && !state.inEmulator) {
+            return true;
+        }
+        return false;
+    }
+
     private void setupWifi() {
         // warn about turning off network notification
-        @SuppressWarnings("deprecation")
         final String notifOn = Settings.Secure.getString(getContentResolver(),
                 Settings.Secure.WIFI_NETWORKS_AVAILABLE_NOTIFICATION_ON);
-        if (notifOn != null && "1".equals(notifOn) && state.wifiReceiver == null) {
-            Toast.makeText(this, getString(R.string.best_results),
-                    Toast.LENGTH_LONG).show();
+        if (notifOn != null && "1".equals(notifOn) && state.wifiReceiver == null && !isFinishing()) {
+            WiGLEToast.showOverActivity(this, R.string.app_name, getString(R.string.best_results));
         }
 
         final WifiManager wifiManager = (WifiManager) this.getApplicationContext().
@@ -1498,8 +1778,6 @@ public final class MainActivity extends AppCompatActivity {
         // keep track of for later
         boolean turnedWifiOn = false;
         if (!wifiManager.isWifiEnabled()) {
-            // tell user, cuz this takes a little while
-            Toast.makeText(this, getString(R.string.turn_on_wifi), Toast.LENGTH_LONG).show();
 
             // save so we can turn it back off when we exit
             edit.putBoolean(ListFragment.PREF_WIFI_WAS_OFF, true);
@@ -1520,7 +1798,7 @@ public final class MainActivity extends AppCompatActivity {
             MainActivity.info("new wifiReceiver");
             // wifi scan listener
             // this receiver is the main workhorse of the entire app
-            state.wifiReceiver = new WifiReceiver(this, state.dbHelper);
+            state.wifiReceiver = new WifiReceiver(this, state.dbHelper, getApplicationContext());
             state.wifiReceiver.setupWifiTimer(turnedWifiOn);
         }
 
@@ -1543,6 +1821,97 @@ public final class MainActivity extends AppCompatActivity {
         registerReceiver(state.wifiReceiver, intentFilter);
     }
 
+    private boolean canBtBeActivated() {
+        final BluetoothAdapter bt = BluetoothAdapter.getDefaultAdapter();
+        if (bt == null) {
+            info("No bluetooth adapter");
+            return false;
+        }
+        if (!bt.isEnabled()) {
+            return true;
+        }
+        return false;
+    }
+
+    public void setupBluetooth() {
+        final BluetoothAdapter bt = BluetoothAdapter.getDefaultAdapter();
+        if (bt == null) {
+            info("No bluetooth adapter");
+            return;
+        }
+        final SharedPreferences prefs = getSharedPreferences( ListFragment.SHARED_PREFS, 0 );
+        final Editor edit = prefs.edit();
+        if (prefs.getBoolean(ListFragment.PREF_SCAN_BT, false)) {
+            if (!bt.isEnabled()) {
+                info("Enable bluetooth");
+                edit.putBoolean(ListFragment.PREF_BT_WAS_OFF, true);
+                bt.enable();
+            } else {
+                edit.putBoolean(ListFragment.PREF_BT_WAS_OFF, false);
+            }
+            edit.commit();
+            if ( state.bluetoothReceiver == null ) {
+                MainActivity.info( "new bluetoothReceiver");
+                // bluetooth scan listener
+                // this receiver is the main workhorse of bluetooth scanning
+                state.bluetoothReceiver = new BluetoothReceiver( this, state.dbHelper );
+                state.bluetoothReceiver.setupBluetoothTimer(true);
+            }
+            info("register bluetooth BroadcastReceiver");
+            final IntentFilter intentFilter = new IntentFilter(BluetoothDevice.ACTION_FOUND);
+            intentFilter.addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED);
+            registerReceiver(state.bluetoothReceiver, intentFilter);
+        }
+    }
+
+    public void endBluetooth(SharedPreferences prefs) {
+        if (state.bluetoothReceiver != null) {
+            state.bluetoothReceiver.stopScanning();
+        }
+
+        final BluetoothAdapter bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
+        if (bluetoothAdapter != null) {
+            if (bluetoothAdapter.isDiscovering()) {
+                bluetoothAdapter.cancelDiscovery();
+            }
+        }
+        try {
+            info("unregister bluetoothReceiver");
+            unregisterReceiver( state.bluetoothReceiver );
+            state.bluetoothReceiver = null;
+        } catch ( final IllegalArgumentException ex ) {
+            //ALIBI: it's fine to call and fail here.
+            info( "bluetoothReceiver not registered: " + ex );
+        }
+
+        final boolean btWasOff = prefs.getBoolean( ListFragment.PREF_BT_WAS_OFF, false );
+        // don't call on emulator, it crashes it
+        if ( btWasOff && ! state.inEmulator ) {
+            // ALIBI: we disabled this for WiFi since we had weird errors with root window disposal. Uncomment if we get that resolved?
+            //WiGLEToast.showOverActivity(this, R.string.app_name, getString(R.string.turning_bt_off));
+
+            // turn it off now that we're done
+            MainActivity.info("turning bluetooth back off");
+            try {
+                final BluetoothAdapter bt = BluetoothAdapter.getDefaultAdapter();
+                if (bt == null) {
+                    info("No bluetooth adapter");
+                } else if (bt.isEnabled()) {
+                    info("Disable bluetooth");
+                    bt.disable();
+                }
+            } catch (Exception ex) {
+                MainActivity.error("exception turning bluetooth back off: " + ex, ex);
+            }
+        }
+    }
+
+    public void bluetoothScan() {
+        if (state.bluetoothReceiver != null) {
+            state.bluetoothReceiver.bluetoothScan();
+        }
+    }
+
     /**
      * Computes the battery level by registering a receiver to the intent triggered
      * by a battery status/level change.
@@ -1556,6 +1925,7 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     public void setTransferring() {
+        info("setTransferring");
         state.transferring.set(true);
     }
 
@@ -1578,18 +1948,12 @@ public final class MainActivity extends AppCompatActivity {
     private void setupService() {
         // could be set by nonconfig retain
         if (state.serviceConnection == null) {
-            final Intent serviceIntent = new Intent(getApplicationContext(), WigleService.class);
-            final ComponentName compName = startService(serviceIntent);
-            if (compName == null) {
-                MainActivity.error("startService() failed!");
-            } else {
-                MainActivity.info("service started ok: " + compName);
-            }
-
             state.serviceConnection = new ServiceConnection() {
                 @Override
                 public void onServiceConnected(final ComponentName name, final IBinder iBinder) {
                     MainActivity.info(name + " service connected");
+                    final WigleService.WigleServiceBinder binder = (WigleService.WigleServiceBinder) iBinder;
+                    state.wigleService = binder.getService();
                 }
 
                 @Override
@@ -1598,10 +1962,11 @@ public final class MainActivity extends AppCompatActivity {
                 }
             };
 
-            int flags = 0;
             // have to use the app context to bind to the service, cuz we're in tabs
             // http://code.google.com/p/android/issues/detail?id=2483#c2
-            final boolean bound = getApplicationContext().bindService(serviceIntent, state.serviceConnection, flags);
+            final Intent serviceIntent = new Intent(getApplicationContext(), WigleService.class);
+            final boolean bound = getApplicationContext().bindService(serviceIntent, state.serviceConnection,
+                    Context.BIND_AUTO_CREATE | Context.BIND_IMPORTANT);
             MainActivity.info("service bound: " + bound);
         }
     }
@@ -1613,11 +1978,12 @@ public final class MainActivity extends AppCompatActivity {
             // check if there is a gps
             final LocationProvider locProvider = locationManager.getProvider(GPS_PROVIDER);
 
-            if (locProvider == null) {
-                Toast.makeText(this, getString(R.string.no_gps_device), Toast.LENGTH_LONG).show();
-            } else if (!locationManager.isProviderEnabled(GPS_PROVIDER)) {
+            if (locProvider == null && !isFinishing()) {
+                WiGLEToast.showOverActivity(this, R.string.app_name, getString(R.string.no_gps_device), Toast.LENGTH_LONG);
+            } else if (!locationManager.isProviderEnabled(GPS_PROVIDER) && !isFinishing()) {
                 // gps exists, but isn't on
-                Toast.makeText(this, getString(R.string.turn_on_gps), Toast.LENGTH_LONG).show();
+                WiGLEToast.showOverActivity(this, R.string.app_name, getString(R.string.turn_on_gps), Toast.LENGTH_LONG);
+
                 final Intent myIntent = new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS);
                 try {
                     startActivity(myIntent);
@@ -1642,7 +2008,18 @@ public final class MainActivity extends AppCompatActivity {
         if (isScanning == oldIsScanning) {
             info("main handleScanChange: no difference, returning");
         }
-        final Editor edit = getSharedPreferences(ListFragment.SHARED_PREFS, 0).edit();
+
+        final SharedPreferences prefs = getSharedPreferences(ListFragment.SHARED_PREFS, 0);
+        final Editor edit = prefs.edit();
+        if (isScanning) {
+            edit.putLong(ListFragment.PREF_STARTTIME_CURRENT_SCAN, System.currentTimeMillis());
+        } else {
+            final long scanTime = prefs.getLong(ListFragment.PREF_CUMULATIVE_SCANTIME_RUN, 0L);
+            final long lastScanStart = prefs.getLong(ListFragment.PREF_STARTTIME_CURRENT_SCAN, System.currentTimeMillis());
+            final long newTare = scanTime + System.currentTimeMillis() - lastScanStart;
+            edit.putLong(ListFragment.PREF_CUMULATIVE_SCANTIME_RUN, newTare);
+        }
+
         edit.putBoolean(ListFragment.PREF_SCAN_RUNNING, isScanning);
         edit.apply();
         internalHandleScanChange(isScanning);
@@ -1653,6 +2030,7 @@ public final class MainActivity extends AppCompatActivity {
         if (isScanning) {
             if (listActivity != null) {
                 listActivity.setStatusUI(getString(R.string.list_scanning_on));
+                listActivity.setScanningStatusIndicator(true);
             }
             if (state.wifiReceiver != null) {
                 state.wifiReceiver.updateLastScanResponseTime();
@@ -1666,6 +2044,7 @@ public final class MainActivity extends AppCompatActivity {
         } else {
             if (listActivity != null) {
                 listActivity.setStatusUI(getString(R.string.list_scanning_off));
+                listActivity.setScanningStatusIndicator(false);
             }
             // turn off location updates
             this.setLocationUpdates(0L, 0f);
@@ -1678,6 +2057,9 @@ public final class MainActivity extends AppCompatActivity {
                     MainActivity.info("exception releasing wifilock: " + ex);
                 }
             }
+        }
+        if (null != state && null != state.wigleService) {
+            state.wigleService.setupNotification();
         }
     }
 
@@ -1815,10 +2197,48 @@ public final class MainActivity extends AppCompatActivity {
         return mDrawerToggle.onOptionsItemSelected(item);
     }
 
-    //@Override
+    public void finishSoon() {
+        finishSoon(FINISH_TIME_MILLIS, false);
+    }
+
+    public void finishSoon(final long finishTimeMillis, final boolean restart) {
+        MainActivity.info("Will finish in " + finishTimeMillis + "ms");
+        new Handler().postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                final Intent i = getBaseContext().getPackageManager()
+                        .getLaunchIntentForPackage(getBaseContext().getPackageName());
+                i.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+
+                if (state.finishing.get()) {
+                    MainActivity.info("finishSoon: finish already called");
+                }
+                else {
+                    MainActivity.info("finishSoon: calling finish now");
+                    finish();
+                }
+
+                if (restart) {
+                    new Handler().postDelayed(new Runnable() {
+                        @Override
+                        public void run() {
+                            startActivity(i);
+                        }
+                    }, 10L);
+                }
+            }
+        }, finishTimeMillis);
+    }
+
+    /**
+     * Never call this directly! call finishSoon to give the service time to show a notification if needed
+     */
     @Override
     public void finish() {
-        info("MAIN: finish. networks: " + state.wifiReceiver.getRunNetworkCount());
+        info("MAIN: finish.");
+        if (state.wifiReceiver != null) {
+            info("MAIN: finish. networks: " + state.wifiReceiver.getRunNetworkCount());
+        }
 
         final boolean wasFinishing = state.finishing.getAndSet(true);
         if (wasFinishing) {
@@ -1837,7 +2257,7 @@ public final class MainActivity extends AppCompatActivity {
         }
 
         // close the db. not in destroy, because it'll still write after that.
-        state.dbHelper.close();
+        if (state.dbHelper != null) state.dbHelper.close();
 
         final LocationManager locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
         if (state.gpsListener != null) {
@@ -1872,9 +2292,6 @@ public final class MainActivity extends AppCompatActivity {
         final boolean wifiWasOff = prefs.getBoolean(ListFragment.PREF_WIFI_WAS_OFF, false);
         // don't call on emulator, it crashes it
         if (wifiWasOff && !state.inEmulator) {
-            // tell user, cuz this takes a little while
-            Toast.makeText(this, getString(R.string.turning_wifi_off), Toast.LENGTH_SHORT).show();
-
             // well turn it of now that we're done
             final WifiManager wifiManager = (WifiManager) getApplicationContext()
                     .getSystemService(Context.WIFI_SERVICE);
@@ -1885,6 +2302,8 @@ public final class MainActivity extends AppCompatActivity {
                 MainActivity.error("exception turning wifi back off: " + ex, ex);
             }
         }
+
+        endBluetooth(prefs);
 
         TelephonyManager tele = (TelephonyManager) getSystemService(TELEPHONY_SERVICE);
         if (tele != null && state.phoneState != null) {
@@ -1906,6 +2325,7 @@ public final class MainActivity extends AppCompatActivity {
         if (state.soundNewPop != null) {
             state.soundNewPop.release();
         }
+        info("MAIN: finish complete.");
 
         super.finish();
     }
@@ -1934,4 +2354,22 @@ public final class MainActivity extends AppCompatActivity {
         selectFragment(LIST_TAB_POS);
         listActivity.makeUploadDialog(this);
     }
+
+    /**
+     * pure-background upload method fo intent-based uploads
+     */
+    public void backgroundUploadFile(){
+        MainActivity.info( "background upload file" );
+        if (this == null) { return; }
+        final State state = getState();
+        setTransferring();
+        state.observationUploader = new ObservationUploader(this,
+                ListFragment.lameStatic.dbHelper, null, false, false, false);
+        try {
+            state.observationUploader.startDownload(null);
+        } catch (WiGLEAuthException waex) {
+            MainActivity.warn("Authentication failure on background run upload");
+        }
+    }
+
 }

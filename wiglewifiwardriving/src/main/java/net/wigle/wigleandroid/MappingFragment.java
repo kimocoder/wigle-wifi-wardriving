@@ -7,7 +7,6 @@ import java.io.UnsupportedEncodingException;
 import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
 import java.net.URL;
-import java.net.URLConnection;
 import java.util.Calendar;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -23,16 +22,13 @@ import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.media.AudioManager;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.support.v4.app.ActivityCompat;
 import android.support.v4.app.DialogFragment;
 import android.support.v4.app.Fragment;
-import android.support.v4.app.FragmentManager;
 import android.support.v4.view.MenuItemCompat;
 import android.util.Base64;
-import android.util.DisplayMetrics;
 import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.MenuInflater;
@@ -61,12 +57,14 @@ import com.google.android.gms.maps.model.Tile;
 import com.google.android.gms.maps.model.TileOverlay;
 import com.google.android.gms.maps.model.TileOverlayOptions;
 import com.google.android.gms.maps.model.TileProvider;
-import com.google.android.gms.maps.model.UrlTileProvider;
 
 import net.wigle.wigleandroid.background.AbstractApiRequest;
 import net.wigle.wigleandroid.background.QueryThread;
+import net.wigle.wigleandroid.db.DatabaseHelper;
 import net.wigle.wigleandroid.model.ConcurrentLinkedHashMap;
 import net.wigle.wigleandroid.model.Network;
+import net.wigle.wigleandroid.ui.UINumberFormat;
+import net.wigle.wigleandroid.ui.WiGLEToast;
 
 /**
  * show a map!
@@ -87,14 +85,18 @@ public final class MappingFragment extends Fragment {
     private AtomicBoolean finishing;
     private Location previousLocation;
     private int previousRunNets;
+    private TileOverlay tileOverlay;
+
+    private Menu menu;
 
     private static final String DIALOG_PREFIX = "DialogPrefix";
     public static final String MAP_DIALOG_PREFIX = "";
     public static LocationListener STATIC_LOCATION_LISTENER = null;
 
+    static final int UPDATE_MAP_FILTER = 1;
+
     private static final int DEFAULT_ZOOM = 17;
     public static final LatLng DEFAULT_POINT = new LatLng(41.95d, -87.65d);
-    private static final int MENU_EXIT = 12;
     private static final int MENU_ZOOM_IN = 13;
     private static final int MENU_ZOOM_OUT = 14;
     private static final int MENU_TOGGLE_LOCK = 15;
@@ -141,10 +143,9 @@ public final class MappingFragment extends Fragment {
             }
             catch (final SecurityException ex) {
                 MainActivity.error("security exception oncreateview map: " + ex, ex);
-                Toast.makeText(getActivity(), getString(R.string.status_fail), Toast.LENGTH_LONG).show();
             }
         } else {
-            Toast.makeText(getActivity(), getString(R.string.map_needs_playservice), Toast.LENGTH_LONG).show();
+            WiGLEToast.showOverFragment(this.getActivity(), R.string.fatal_pre_message, getString(R.string.map_needs_playservice));
         }
         MapsInitializer.initialize(getActivity());
         final View view = inflater.inflate(R.layout.map, container, false);
@@ -186,11 +187,58 @@ public final class MappingFragment extends Fragment {
                 }
 
                 googleMap.setBuildingsEnabled(true);
-                final boolean showTraffic = prefs.getBoolean(ListFragment.PREF_MAP_TRAFFIC, true);
-                googleMap.setTrafficEnabled(showTraffic);
-                final int mapType = prefs.getInt(ListFragment.PREF_MAP_TYPE, GoogleMap.MAP_TYPE_NORMAL);
-                googleMap.setMapType(mapType);
+                if (null != prefs) {
+                    final boolean showTraffic = prefs.getBoolean(ListFragment.PREF_MAP_TRAFFIC, true);
+                    googleMap.setTrafficEnabled(showTraffic);
+                    final int mapType = prefs.getInt(ListFragment.PREF_MAP_TYPE, GoogleMap.MAP_TYPE_NORMAL);
+                    googleMap.setMapType(mapType);
+                } else {
+                    googleMap.setMapType(GoogleMap.MAP_TYPE_NORMAL);
+                }
                 mapRender = new MapRender(getActivity(), googleMap, false);
+
+                // Seeing stack overflow crashes on multiple phones in specific locations, based on indoor svcs.
+                googleMap.setIndoorEnabled(false);
+
+                googleMap.setOnMyLocationButtonClickListener(new GoogleMap.OnMyLocationButtonClickListener() {
+                    @Override
+                    public boolean onMyLocationButtonClick() {
+                        if (!state.locked) {
+
+                            state.locked = true;
+                            if (menu != null) {
+                                MenuItem item = menu.findItem(MENU_TOGGLE_LOCK);
+                                String name = state.locked ? getString(R.string.menu_turn_off_lockon) : getString(R.string.menu_turn_on_lockon);
+                                item.setTitle(name);
+                                MainActivity.info("on-my-location received - activating lock");
+                            }
+                        }
+                        return false;
+                    }
+                });
+
+                googleMap.setOnCameraMoveStartedListener(new GoogleMap.OnCameraMoveStartedListener() {
+                    @Override
+                    public void onCameraMoveStarted(int reason) {
+                        if (reason ==REASON_GESTURE) {
+                            if (state.locked) {
+                                state.locked = false;
+                                if (menu != null) {
+                                    MenuItem item = menu.findItem(MENU_TOGGLE_LOCK);
+                                    String name = state.locked ? getString(R.string.menu_turn_off_lockon) : getString(R.string.menu_turn_on_lockon);
+                                    item.setTitle(name);
+                                }
+                            }
+                        } else if (reason ==REASON_API_ANIMATION) {
+                            //DEBUG: MainActivity.info("Camera moved due to user tap");
+                            //TODO: should we combine this case with REASON_GESTURE?
+                        } else if (reason ==REASON_DEVELOPER_ANIMATION) {
+                            //MainActivity.info("Camera moved due to app directive");
+                        }
+                    }
+
+
+                });
 
                 // controller
                 final LatLng centerPoint = getCenter(getActivity(), oldCenter, previousLocation);
@@ -198,14 +246,17 @@ public final class MappingFragment extends Fragment {
                 if (oldZoom >= 0) {
                     zoom = oldZoom;
                 } else {
-                    zoom = prefs.getFloat(ListFragment.PREF_PREV_ZOOM, zoom);
+                    if (null != prefs) {
+                        zoom = prefs.getFloat(ListFragment.PREF_PREV_ZOOM, zoom);
+                    }
                 }
 
                 final CameraPosition cameraPosition = new CameraPosition.Builder()
                         .target(centerPoint).zoom(zoom).build();
                 googleMap.moveCamera(CameraUpdateFactory.newCameraPosition(cameraPosition));
 
-                if (!ListFragment.PREF_MAP_NO_TILE.equals(
+
+                if (null != prefs && !ListFragment.PREF_MAP_NO_TILE.equals(
                         prefs.getString(ListFragment.PREF_SHOW_DISCOVERED,
                                 ListFragment.PREF_MAP_NO_TILE))) {
                     final int providerTileRes = MainActivity.isHighDefinition()?512:256;
@@ -220,7 +271,9 @@ public final class MappingFragment extends Fragment {
                             ifAuthToken = "Basic " + encoded;
                         }
                     } catch (UnsupportedEncodingException ueex) {
-                        MainActivity.error("map tiles unable to encode credentials for mine/others");
+                        MainActivity.error("map tiles: unable to encode credentials for mine/others", ueex);
+                    } catch (UnsupportedOperationException uoex) {
+                        MainActivity.error("map tiles: unable to access credentials for mine/others", uoex);
                     }
                     final String authToken = ifAuthToken;
 
@@ -269,14 +322,11 @@ public final class MappingFragment extends Fragment {
                         }
 
                         /*
-                         * Check that the tile server supports the requested x, y and zoom.
-                         * Complete this stub according to the tile range you support.
-                         * If you support a limited range of tiles at different zoom levels, then you
-                         * need to define the supported x, y range at each zoom level.
+                         * depends on supported levels on the server
                          */
                         private boolean checkTileExists(int x, int y, int zoom) {
                             int minZoom = 0;
-                            int maxZoom = 18;
+                            int maxZoom = 24;
 
                             if ((zoom < minZoom || zoom > maxZoom)) {
                                 return false;
@@ -322,7 +372,7 @@ public final class MappingFragment extends Fragment {
 
 
 
-                    TileOverlay tileOverlay = googleMap.addTileOverlay(new TileOverlayOptions()
+                    tileOverlay = googleMap.addTileOverlay(new TileOverlayOptions()
                             .tileProvider(tileProvider).transparency(0.35f));
                 }
             }
@@ -423,11 +473,17 @@ public final class MappingFragment extends Fragment {
 
                 if (view != null) {
                     TextView tv = (TextView) view.findViewById(R.id.stats_run);
-                    tv.setText(getString(R.string.run) + ": " + ListFragment.lameStatic.runNets);
-                    tv = (TextView) view.findViewById(R.id.stats_new);
-                    tv.setText(getString(R.string.new_word) + ": " + ListFragment.lameStatic.newNets);
-                    tv = (TextView) view.findViewById(R.id.stats_dbnets);
-                    tv.setText(getString(R.string.db) + ": " + ListFragment.lameStatic.dbNets);
+                    tv.setText(getString(R.string.run) + ": " + UINumberFormat.counterFormat(
+                            ListFragment.lameStatic.runNets+ListFragment.lameStatic.runBt));
+                    tv = (TextView) view.findViewById(R.id.stats_wifi);
+                    tv.setText( UINumberFormat.counterFormat(ListFragment.lameStatic.newWifi) );
+                    tv = (TextView) view.findViewById( R.id.stats_cell );
+                    tv.setText( ""+UINumberFormat.counterFormat(ListFragment.lameStatic.newCells)  );
+                    tv = (TextView) view.findViewById( R.id.stats_bt );
+                    tv.setText( ""+UINumberFormat.counterFormat(ListFragment.lameStatic.newBt)  );
+
+                    tv = (TextView) view.findViewById( R.id.stats_dbnets );
+                    tv.setText(UINumberFormat.counterFormat(ListFragment.lameStatic.dbNets));
                 }
 
                 final long period = 1000L;
@@ -454,25 +510,29 @@ public final class MappingFragment extends Fragment {
     @Override
     public void onDestroy() {
         MainActivity.info( "MAP: destroy mapping." );
-        finishing.set( true );
+        finishing.set(true);
 
         mapView.getMapAsync(new OnMapReadyCallback() {
-            @Override
-            public void onMapReady(final GoogleMap googleMap) {
-                // save zoom
-                final SharedPreferences prefs = getActivity().getSharedPreferences( ListFragment.SHARED_PREFS, 0 );
-                final Editor edit = prefs.edit();
-                edit.putFloat( ListFragment.PREF_PREV_ZOOM, googleMap.getCameraPosition().zoom );
-                edit.apply();
 
-                // save center
-                state.oldCenter = googleMap.getCameraPosition().target;
+        @Override
+        public void onMapReady(final GoogleMap googleMap) {
+            // save zoom
+            final SharedPreferences prefs = getActivity().getSharedPreferences(ListFragment.SHARED_PREFS, 0);
+            if (null != prefs) {
+                final Editor edit = prefs.edit();
+                edit.putFloat(ListFragment.PREF_PREV_ZOOM, googleMap.getCameraPosition().zoom);
+                edit.apply();
+            } else {
+                MainActivity.warn("failed saving map state - unable to get preferences.");
+            }
+            // save center
+            state.oldCenter = googleMap.getCameraPosition().target;
             }
         });
+
         try {
             mapView.onDestroy();
-        }
-        catch (NullPointerException ex) {
+        } catch (NullPointerException ex) {
             // seen in the wild
             MainActivity.info("exception in mapView.onDestroy: " + ex, ex);
         }
@@ -499,6 +559,18 @@ public final class MappingFragment extends Fragment {
     @Override
     public void onResume() {
         MainActivity.info( "MAP: onResume" );
+        if (mapRender != null) {
+            mapRender.onResume();
+        }
+        if (null != mapView) {
+            //refresh tiles on resume
+            mapView.postInvalidate();
+        }
+
+        if (null != tileOverlay) {
+            //DEBUG: MainActivity.info("clearing tile overlay cache");
+            tileOverlay.clearTileCache();
+        }
         super.onResume();
 
         setupTimer();
@@ -565,7 +637,7 @@ public final class MappingFragment extends Fragment {
         item.setIcon( android.R.drawable.ic_menu_mapmode );
         MenuItemCompat.setShowAsAction(item, MenuItemCompat.SHOW_AS_ACTION_IF_ROOM);
 
-        item = menu.add(0, MENU_FILTER, 0, getString(R.string.menu_ssid_filter));
+        item = menu.add(0, MENU_FILTER, 0, getString(R.string.settings_map_head));
         item.setIcon( android.R.drawable.ic_menu_search );
         MenuItemCompat.setShowAsAction(item, MenuItemCompat.SHOW_AS_ACTION_IF_ROOM);
 
@@ -595,6 +667,7 @@ public final class MappingFragment extends Fragment {
         // item.setIcon( android.R.drawable.ic_menu_close_clear_cancel );
 
         super.onCreateOptionsMenu(menu, inflater);
+        this.menu = menu;
     }
 
     /* Handles item selections */
@@ -602,11 +675,6 @@ public final class MappingFragment extends Fragment {
     public boolean onOptionsItemSelected( final MenuItem item ) {
         final SharedPreferences prefs = getActivity().getSharedPreferences( ListFragment.SHARED_PREFS, 0 );
         switch ( item.getItemId() ) {
-            case MENU_EXIT: {
-                final MainActivity main = MainActivity.getMainActivity();
-                main.finish();
-                return true;
-            }
             case MENU_ZOOM_IN: {
                 mapView.getMapAsync(new OnMapReadyCallback() {
                     @Override
@@ -695,7 +763,8 @@ public final class MappingFragment extends Fragment {
                 return true;
             }
             case MENU_FILTER: {
-                onCreateDialog( SSID_FILTER );
+                final Intent intent = new Intent(getActivity(), MapFilterActivity.class);
+                getActivity().startActivityForResult(intent, UPDATE_MAP_FILTER);
                 return true;
             }
             case MENU_MAP_TYPE: {
@@ -706,19 +775,19 @@ public final class MappingFragment extends Fragment {
                         switch (newMapType) {
                             case GoogleMap.MAP_TYPE_NORMAL:
                                 newMapType = GoogleMap.MAP_TYPE_SATELLITE;
-                                Toast.makeText(getActivity(), getString(R.string.map_toast_satellite), Toast.LENGTH_SHORT).show();
+                                WiGLEToast.showOverActivity(getActivity(), R.string.tab_map, getString(R.string.map_toast_satellite), Toast.LENGTH_SHORT);
                                 break;
                             case GoogleMap.MAP_TYPE_SATELLITE:
                                 newMapType = GoogleMap.MAP_TYPE_HYBRID;
-                                Toast.makeText(getActivity(), getString(R.string.map_toast_hybrid), Toast.LENGTH_SHORT).show();
+                                WiGLEToast.showOverActivity(getActivity(), R.string.tab_map, getString(R.string.map_toast_hybrid), Toast.LENGTH_SHORT);
                                 break;
                             case GoogleMap.MAP_TYPE_HYBRID:
                                 newMapType = GoogleMap.MAP_TYPE_TERRAIN;
-                                Toast.makeText(getActivity(), getString(R.string.map_toast_terrain), Toast.LENGTH_SHORT).show();
+                                WiGLEToast.showOverActivity(getActivity(), R.string.tab_map, getString(R.string.map_toast_terrain), Toast.LENGTH_SHORT);
                                 break;
                             case GoogleMap.MAP_TYPE_TERRAIN:
                                 newMapType = GoogleMap.MAP_TYPE_NORMAL;
-                                Toast.makeText(getActivity(), getString(R.string.map_toast_normal), Toast.LENGTH_SHORT).show();
+                                WiGLEToast.showOverActivity(getActivity(), R.string.tab_map, getString(R.string.map_toast_normal), Toast.LENGTH_SHORT);
                                 break;
                             default:
                                 MainActivity.error("unhandled mapType: " + newMapType);
@@ -739,27 +808,6 @@ public final class MappingFragment extends Fragment {
             }
         }
         return false;
-    }
-
-    public void onCreateDialog( int which ) {
-        DialogFragment dialogFragment = null;
-        switch ( which ) {
-            case SSID_FILTER:
-                dialogFragment = createSsidFilterDialog( MAP_DIALOG_PREFIX );
-                break;
-            default:
-                MainActivity.error( "unhandled dialog: " + which );
-        }
-
-        if (dialogFragment != null) {
-            final FragmentManager fm = getActivity().getSupportFragmentManager();
-            try {
-                dialogFragment.show(fm, MainActivity.LIST_FRAGMENT_TAG);
-            }
-            catch (final IllegalStateException ex) {
-                MainActivity.error("dialog error: " + ex, ex);
-            }
-        }
     }
 
     public static class MapDialogFragment extends DialogFragment {

@@ -6,10 +6,11 @@ import net.wigle.wigleandroid.background.ApiListener;
 import net.wigle.wigleandroid.background.ObservationImporter;
 import net.wigle.wigleandroid.background.ObservationUploader;
 import net.wigle.wigleandroid.background.TransferListener;
-import net.wigle.wigleandroid.background.FileUploaderTask;
 import net.wigle.wigleandroid.background.KmlWriter;
+import net.wigle.wigleandroid.db.DBException;
 import net.wigle.wigleandroid.model.Pair;
 import net.wigle.wigleandroid.model.QueryArgs;
+import net.wigle.wigleandroid.ui.WiGLEToast;
 
 import android.annotation.SuppressLint;
 import android.app.AlertDialog;
@@ -21,6 +22,7 @@ import android.location.Address;
 import android.location.Geocoder;
 import android.media.AudioManager;
 import android.os.AsyncTask;
+import android.os.Build;
 import android.os.Bundle;
 import android.support.annotation.NonNull;
 import android.support.v4.app.DialogFragment;
@@ -37,9 +39,7 @@ import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.TextView;
-import android.widget.Toast;
 
-import org.json.JSONException;
 import org.json.JSONObject;
 
 
@@ -48,7 +48,6 @@ import org.json.JSONObject;
  */
 public final class DataFragment extends Fragment implements ApiListener, TransferListener, DialogListener {
 
-    private static final int MENU_EXIT = 11;
     private static final int MENU_ERROR_REPORT = 13;
 
     private static final int CSV_RUN_DIALOG = 120;
@@ -59,6 +58,7 @@ public final class DataFragment extends Fragment implements ApiListener, Transfe
     private static final int IMPORT_DIALOG = 125;
     private static final int ZERO_OUT_DIALOG = 126;
     private static final int MAX_OUT_DIALOG = 127;
+    private static final int DELETE_DIALOG = 128;
 
     /** Called when the activity is first created. */
     @Override
@@ -145,7 +145,7 @@ public final class DataFragment extends Fragment implements ApiListener, Transfe
 
                 if (fail != null) {
                     // toast!
-                    Toast.makeText(getActivity(), fail, Toast.LENGTH_SHORT).show();
+                    WiGLEToast.showOverFragment(getActivity(), R.string.error_general, fail);
                 } else {
                     ListFragment.lameStatic.queryArgs = queryArgs;
                     // start db result activity
@@ -241,14 +241,54 @@ public final class DataFragment extends Fragment implements ApiListener, Transfe
 
     private void setupImportObservedButton( final View view ) {
         final Button importObservedButton = (Button) view.findViewById( R.id.import_observed_button );
+        final SharedPreferences prefs = getActivity().getSharedPreferences(ListFragment.SHARED_PREFS, 0);
+        final String authname = prefs.getString(ListFragment.PREF_AUTHNAME, null);
 
-        importObservedButton.setOnClickListener( new OnClickListener() {
+        if (null == authname) {
+            importObservedButton.setEnabled(false);
+        } else if (MainActivity.getMainActivity().isTransferring()) {
+                importObservedButton.setEnabled(false);
+        }
+        importObservedButton.setOnClickListener(new OnClickListener() {
             @Override
-            public void onClick( final View buttonView ) {
-                MainActivity.createConfirmation( getActivity(),
-                        DataFragment.this.getString(R.string.data_import_observed), MainActivity.DATA_TAB_POS, IMPORT_DIALOG);
+            public void onClick(final View buttonView) {
+                MainActivity.createConfirmation(getActivity(),
+                        DataFragment.this.getString(R.string.data_import_observed),
+                        MainActivity.DATA_TAB_POS, IMPORT_DIALOG);
             }
         });
+    }
+
+    private void createAndStartImport() {
+        final MainActivity mainActivity = MainActivity.getMainActivity(DataFragment.this);
+        if (mainActivity != null) {
+            mainActivity.setTransferring();
+        }
+
+        // actually need this Activity context, for dialogs
+        if (Build.VERSION.SDK_INT >= 11) {
+
+            final ObservationImporter task = new ObservationImporter(getActivity(),
+                    ListFragment.lameStatic.dbHelper,
+                    new ApiListener() {
+                        @Override
+                        public void requestComplete(JSONObject object, boolean cached) {
+                            if (mainActivity != null) {
+                                try {
+                                    mainActivity.getState().dbHelper.getNetworkCountFromDB();
+                                } catch (DBException dbe) {
+                                    MainActivity.warn("failed DB count update on import-observations", dbe);
+                                }
+                                mainActivity.transferComplete();
+                            }
+                        }
+                    });
+            try {
+                task.startDownload(this);
+            } catch (WiGLEAuthException waex) {
+                MainActivity.info("failed to authorize user on request");
+            }
+        }
     }
 
     @SuppressLint("SetTextI18n")
@@ -281,6 +321,17 @@ public final class DataFragment extends Fragment implements ApiListener, Transfe
                         MainActivity.DATA_TAB_POS, MAX_OUT_DIALOG);
             }
         } );
+
+        //ALIBI: not technically a marker button, but clearly belongs with them visually/logically
+        final Button deleteDbButton = (Button) view.findViewById(R.id.clear_db);
+        deleteDbButton.setOnClickListener( new OnClickListener() {
+            @Override
+            public void onClick( final View buttonView ) {
+                MainActivity.createConfirmation( getActivity(), getString(R.string.delete_db_confirm),
+                        MainActivity.DATA_TAB_POS, DELETE_DIALOG);
+            }
+        } );
+
     }
 
     @SuppressLint("SetTextI18n")
@@ -321,26 +372,7 @@ public final class DataFragment extends Fragment implements ApiListener, Transfe
                 break;
             }
             case IMPORT_DIALOG: {
-                final MainActivity mainActivity = MainActivity.getMainActivity(DataFragment.this);
-                if (mainActivity != null) {
-                    mainActivity.setTransferring();
-                }
-                // actually need this Activity context, for dialogs
-                final ObservationImporter task = new ObservationImporter(getActivity(),
-                        ListFragment.lameStatic.dbHelper,
-                        new ApiListener() {
-                            @Override
-                            public void requestComplete(JSONObject object, boolean cached) {
-                                if (mainActivity != null) {
-                                    mainActivity.transferComplete();
-                                }
-                            }
-                        });
-                try {
-                    task.startDownload(this);
-                } catch (WiGLEAuthException waex) {
-                    //moot due to bundle handling
-                }
+                this.createAndStartImport();
                 break;
             }
             case ZERO_OUT_DIALOG: {
@@ -361,6 +393,25 @@ public final class DataFragment extends Fragment implements ApiListener, Transfe
                     final TextView tv = (TextView) view.findViewById(R.id.reset_maxid_text);
                     tv.setText(getString(R.string.setting_max_id) + " " + maxDB);
                 }
+                break;
+            }
+            case DELETE_DIALOG: {
+                //blow away the DB
+                ListFragment.lameStatic.dbHelper.clearDatabase();
+                //update markers
+                editor.putLong( ListFragment.PREF_DB_MARKER, 0L );
+                editor.putLong( ListFragment.PREF_DB_MARKER, 0L );
+                editor.apply();
+                if (view != null) {
+                    final TextView tv = (TextView) view.findViewById(R.id.reset_maxid_text);
+                    tv.setText(getString(R.string.setting_max_id) + " " + 0L);
+                }
+                try {
+                    ListFragment.lameStatic.dbHelper.getNetworkCountFromDB();
+                } catch (DBException dbe) {
+                    MainActivity.warn("Failed to update network count on DB clear: ", dbe);
+                }
+
                 break;
             }
             default:
@@ -492,10 +543,6 @@ public final class DataFragment extends Fragment implements ApiListener, Transfe
     @Override
     public boolean onOptionsItemSelected( final MenuItem item ) {
         switch ( item.getItemId() ) {
-            case MENU_EXIT:
-                final MainActivity main = MainActivity.getMainActivity();
-                main.finish();
-                return true;
             case MENU_ERROR_REPORT:
                 final Intent errorReportIntent = new Intent( getActivity(), ErrorReportActivity.class );
                 startActivity( errorReportIntent );

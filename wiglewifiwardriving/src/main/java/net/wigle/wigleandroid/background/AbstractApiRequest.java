@@ -5,7 +5,7 @@ import android.support.v4.app.Fragment;
 import android.support.v4.app.FragmentActivity;
 import android.util.Base64;
 
-import net.wigle.wigleandroid.DatabaseHelper;
+import net.wigle.wigleandroid.db.DatabaseHelper;
 import net.wigle.wigleandroid.ListFragment;
 import net.wigle.wigleandroid.MainActivity;
 import net.wigle.wigleandroid.TokenAccess;
@@ -160,10 +160,19 @@ public abstract class AbstractApiRequest extends AbstractBackgroundTask {
     }
 
     public JSONObject getCached() {
-        final File file = new File(MainActivity.getSDPath() + cacheFilename);
-        if (! file.exists() || !file.canRead()) {
-            MainActivity.warn("Cache file doesn't exist or can't be read: " + file);
-            return null;
+        File file = null;
+        if (MainActivity.hasSD()) {
+            file = new File(MainActivity.getSDPath() + cacheFilename);
+            if (!file.exists() || !file.canRead()) {
+                MainActivity.warn("External cache file doesn't exist or can't be read: " + file);
+                return null;
+            }
+        } else {
+            file = new File(context.getCacheDir(), cacheFilename);
+            if (!file.exists() || !file.canRead()) {
+                MainActivity.warn("App-internal cache file doesn't exist or can't be read: " + file);
+                return null;
+            }
         }
         BufferedReader br = null;
         JSONObject json = null;
@@ -199,9 +208,9 @@ public abstract class AbstractApiRequest extends AbstractBackgroundTask {
 
         FileOutputStream fos = null;
         try {
-            fos = MainActivity.createFile(context, cacheFilename);
+            fos = MainActivity.createFile(context, cacheFilename, true);
             // header
-            FileUploaderTask.writeFos(fos, result);
+            ObservationUploader.writeFos(fos, result);
         }
         catch (final IOException ex) {
             MainActivity.error("exception caching result: " + ex, ex);
@@ -231,13 +240,15 @@ public abstract class AbstractApiRequest extends AbstractBackgroundTask {
                 ListFragment.SHARED_PREFS, 0);
         final boolean beAnonymous = prefs.getBoolean(ListFragment.PREF_BE_ANONYMOUS, false);
         final String authname = prefs.getString(ListFragment.PREF_AUTHNAME, null);
+        final String username = prefs.getString(ListFragment.PREF_USERNAME, null);
+        final String password = prefs.getString(ListFragment.PREF_PASSWORD, null);
         MainActivity.info("authname: " + authname);
         if (beAnonymous && requiresLogin) {
             MainActivity.info("anonymous, not running ApiRequest: " + this);
             return;
         }
-        if (authname == null && doBasicLogin) {
-            MainActivity.info("No authname, going to request token");
+        if (authname == null && username != null && password != null && doBasicLogin) {
+            MainActivity.info("No authname but have username, going to request token");
             downloadTokenAndStart(fragment);
         } else {
             start();
@@ -245,7 +256,6 @@ public abstract class AbstractApiRequest extends AbstractBackgroundTask {
     }
 
     protected String getResultString(final BufferedReader reader) throws IOException, InterruptedException {
-        // final Bundle bundle = new Bundle();
         String line;
         final StringBuilder result = new StringBuilder();
         while ( (line = reader.readLine()) != null ) {

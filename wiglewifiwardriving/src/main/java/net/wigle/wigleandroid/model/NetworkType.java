@@ -6,7 +6,12 @@ import java.util.Map;
 public enum NetworkType {
     WIFI("W"),
     GSM("G"),
-    CDMA("C");
+    CDMA("C"),
+    LTE("L"),
+    WCDMA("D"),
+    BT("B"),
+    BLE("E"),
+    NFC("N");
 
     private static final Map<String,NetworkType> types = new HashMap<>();
 

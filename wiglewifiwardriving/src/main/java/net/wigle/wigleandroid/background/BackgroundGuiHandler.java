@@ -1,13 +1,14 @@
 package net.wigle.wigleandroid.background;
 
 import net.wigle.wigleandroid.MainActivity;
+import net.wigle.wigleandroid.ProgressPanel;
 import net.wigle.wigleandroid.R;
-import net.wigle.wigleandroid.SettingsFragment;
-import net.wigle.wigleandroid.background.AbstractBackgroundTask.ProgressDialogFragment;
+import net.wigle.wigleandroid.ui.WiGLEToast;
+
 import android.app.AlertDialog;
 import android.app.Dialog;
+import android.content.Context;
 import android.content.DialogInterface;
-import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
@@ -15,28 +16,28 @@ import android.support.annotation.NonNull;
 import android.support.v4.app.DialogFragment;
 import android.support.v4.app.FragmentActivity;
 import android.support.v4.app.FragmentManager;
-import android.widget.Toast;
 
 public class BackgroundGuiHandler extends Handler {
     public static final int WRITING_PERCENT_START = 100000;
     public static final int AUTHENTICATION_ERROR = 1;
+    public static final int CONNECTION_ERROR = -1;
     public static final String ERROR = "error";
     public static final String FILENAME = "filename";
     public static final String FILEPATH = "filepath";
 
     private FragmentActivity context;
     private final Object lock;
-    private final ProgressDialogFragment pd;
+    private final ProgressPanel pp;
     private final AlertSettable alertSettable;
 
     private String msg_text = "";
 
-    public BackgroundGuiHandler(final FragmentActivity context, final Object lock, final ProgressDialogFragment pd,
+    public BackgroundGuiHandler(final FragmentActivity context, final Object lock, final ProgressPanel pp,
                                 final AlertSettable alertSettable) {
 
         this.context = context;
         this.lock = lock;
-        this.pd = pd;
+        this.pp = pp;
         this.alertSettable = alertSettable;
     }
 
@@ -50,19 +51,26 @@ public class BackgroundGuiHandler extends Handler {
     public void handleMessage( final Message msg ) {
         synchronized ( lock ) {
             if (msg.what == AUTHENTICATION_ERROR) {
-                Toast.makeText(this.context, R.string.status_login_fail
-                        , Toast.LENGTH_LONG).show();
+                WiGLEToast.showOverActivity(this.context, R.string.error_general, context.getString(R.string.status_login_fail));
+                if (pp != null) {
+                    pp.hide();
+                }
             }
-            if (pd == null) {
+            if (msg.what == CONNECTION_ERROR) {
+                WiGLEToast.showOverActivity(this.context, R.string.error_general, context.getString(R.string.no_wigle_conn));
+                if (pp != null) {
+                    pp.hide();
+                }
+            }
+            if (pp == null) {
                 // no dialog box, just return
                 return;
             }
 
             if ( msg.what >= WRITING_PERCENT_START ) {
                 final int percentTimesTen = msg.what - WRITING_PERCENT_START;
-                pd.setMessage( context.getSupportFragmentManager(), msg_text + " " + (percentTimesTen/10f) + "%" );
-                // "The progress range is 0..10000."
-                pd.setProgress( context.getSupportFragmentManager(), percentTimesTen * 10 );
+                pp.setMessage( msg_text + " " + (percentTimesTen/10f) + "%" );
+                pp.setProgress( percentTimesTen / 10 );
                 return;
             }
 
@@ -72,29 +80,36 @@ public class BackgroundGuiHandler extends Handler {
             }
             final Status status = Status.values()[ msg.what ];
             if ( Status.UPLOADING.equals( status ) ) {
-                //          pd.setMessage( status.getMessage() );
                 msg_text = context.getString( status.getMessage() );
-                pd.setProgress(context.getSupportFragmentManager(), 0);
+                pp.setProgress(0);
                 return;
-            }
-            if ( Status.WRITING.equals( status ) ) {
+            } else if ( Status.WRITING.equals( status ) ) {
                 msg_text = context.getString( status.getMessage() );
-                pd.setProgress(context.getSupportFragmentManager(), 0);
+                pp.setProgress(0);
+                return;
+            } else if ( Status.DOWNLOADING.equals( status ) ) {
+                msg_text = context.getString( status.getMessage() );
+                //pp.setProgress(0);
+                return;
+            } else if ( Status.PARSING.equals( status ) ) {
+                msg_text = context.getString( status.getMessage() );
+                pp.setProgress(0);
                 return;
             }
 
             // If we got this far then the task is done
 
             // make sure we didn't lose this dialog this somewhere
-            if ( pd != null ) {
+            if ( pp != null ) {
                 try {
-                    MainActivity.info("fragment from pd: " + pd);
-                    pd.dismiss();
+                    MainActivity.info("fragment from pp: " + pp);
+                    AbstractBackgroundTask.updateTransferringState(false, context);
+                    pp.hide();
                     alertSettable.clearProgressDialog();
                 }
                 catch ( Exception ex ) {
-                    // guess it wasn't there anyways
-                    MainActivity.info( "exception dismissing dialog: " + ex );
+                    // guess it wasn't there anyway
+                    MainActivity.info( "exception dismissing dialog/hiding progress: " + ex );
                 }
             }
             // Activity context
@@ -106,19 +121,49 @@ public class BackgroundGuiHandler extends Handler {
                     dialog.dismiss();
                 }
                 catch ( Exception ex ) {
-                    // guess it wasn't there anyways
+                    // you can't dismiss what isn't there
                     MainActivity.info( "exception dismissing fm dialog: " + ex );
                 }
             }
 
-            final BackgroundAlertDialog alertDialog = BackgroundAlertDialog.newInstance(msg, status);
-            try {
-                alertDialog.show(fm, "background-dialog");
-            }
-            catch (IllegalStateException ex) {
-                MainActivity.warn("illegal state in background gui handler: " + ex, ex);
+            if (Status.SUCCESS.equals(status)) {
+                //ALIBI: for now, success gets a long custom toast, other messages get dialogs
+                WiGLEToast.showOverFragment(context, status.getTitle(),
+                        composeDisplayMessage(context,  msg.peekData().getString( ERROR ),
+                        msg.peekData().getString( FILEPATH ), msg.peekData().getString( FILENAME ),
+                        status.getMessage()));
+            } else {
+                final BackgroundAlertDialog alertDialog = BackgroundAlertDialog.newInstance(msg, status);
+                try {
+                    alertDialog.show(fm, "background-dialog");
+                } catch (IllegalStateException ex) {
+                    MainActivity.warn("illegal state in background gui handler: ", ex);
+                }
             }
         }
+    }
+
+    public static String composeDisplayMessage(Context context, String error, String filepath,
+                                        String filename, final int messageId) {
+        if ( filename != null ) {
+            // just don't show the gz
+            int index = filename.indexOf( ".gz" );
+            if ( index > 0 ) {
+                filename = filename.substring( 0, index );
+            }
+            index = filename.indexOf( ".kml" );
+            if ( index > 0 ) {
+                filename = filename.substring( 0, index );
+            }
+        }
+        if ( filename == null ) {
+            filename = "";
+        } else {
+            filename = "\n\nFile location:\n" + filepath + filename;
+        }
+        error = error == null ? "" : " Error: " + error;
+
+        return context.getString(messageId) + error + filename;
     }
 
     public static class BackgroundAlertDialog extends DialogFragment {
@@ -143,32 +188,9 @@ public class BackgroundGuiHandler extends Handler {
             final int message = bundle.getInt("message");
             final int status = bundle.getInt("status");
 
-            String filename;
-
-            String filepath = bundle.getString( FILEPATH );
-            filepath = filepath == null ? "" : filepath + "\n";
-            filename = bundle.getString( FILENAME );
-            if ( filename != null ) {
-                // just don't show the gz
-                int index = filename.indexOf( ".gz" );
-                if ( index > 0 ) {
-                    filename = filename.substring( 0, index );
-                }
-                index = filename.indexOf( ".kml" );
-                if ( index > 0 ) {
-                    filename = filename.substring( 0, index );
-                }
-            }
-            if ( filename == null ) {
-                filename = "";
-            }
-            else {
-                filename = "\n\nFile location:\n" + filepath + filename;
-            }
-
-            String error = bundle.getString( ERROR );
-            error = error == null ? "" : " Error: " + error;
-            builder.setMessage( activity.getString( message ) + error + filename );
+            builder.setMessage( composeDisplayMessage(activity,  bundle.getString( ERROR ),
+                    bundle.getString( FILEPATH ), bundle.getString( FILENAME ),
+                    message ));
 
             AlertDialog ad = builder.create();
             ad.setButton( DialogInterface.BUTTON_POSITIVE, "OK", new DialogInterface.OnClickListener() {
@@ -176,8 +198,7 @@ public class BackgroundGuiHandler extends Handler {
                 public void onClick( final DialogInterface dialog, final int which ) {
                     try {
                         dialog.dismiss();
-                    }
-                    catch ( Exception ex ) {
+                    } catch ( Exception ex ) {
                         // guess it wasn't there anyways
                         MainActivity.info( "exception dismissing alert dialog: " + ex );
                     }
@@ -187,8 +208,7 @@ public class BackgroundGuiHandler extends Handler {
                         MainActivity.info("dialog: start settings fragment");
                         try {
                             MainActivity.getMainActivity().selectFragment(MainActivity.SETTINGS_TAB_POS);
-                        }
-                        catch (Exception ex) {
+                        } catch (Exception ex) {
                             MainActivity.info("failed to start settings fragment: " + ex, ex);
                         }
                     }
@@ -197,5 +217,4 @@ public class BackgroundGuiHandler extends Handler {
             return ad;
         }
     }
-
 }

@@ -1,3 +1,83 @@
+* 2.38 (10/29/2018)
+Changing http library
+More edge case bug fixes
+
+* 2.37 (10/16/2018)
+Edge case bug fixes
+
+* 2.32 - 2.36 (10/04/2018)
+Added bluetooth support
+Default Android Pie to 30 sec scans due to its throttling
+Please star feature request to fix Pie's throttling: https://issuetracker.google.com/issues/112688545
+Cell tower refactoring, take advantage of new api's
+
+* 2.30 - 2.31 (07/15/2018)
+More expansive cell logging
+Updated OUI manufacturer data
+Another stab at fixing RemoteServiceException Android race condition
+
+* 2.29 (05/12/2018)
+Better French translation (thanks marmat8951!)
+Another stab at fixing RemoteServiceException
+Handle user force-closing properly
+
+* 2.28 (04/15/2018)
+Add configurable timeouts for GPS and Network Location
+Adding a run timer to the dashboard
+New vector-derived icon set
+Adding a "view" button to the upload panel for direct KML intent integration (Google Earth and other viewers)
+Split traditional Chinese (TW and HK) from simplified
+Language pack synchronization to assist with translation (ongoing)
+Various bug fixes
+
+* 2.27 (02/24/2018)
+Share button on uploads panel.
+Better registration integration.
+Camera feature optional for devices.
+Fix up app-local storage.
+Fix Lineage crypto credentials in maps.
+Simplify notification service, hopefully reduce Oreo crashes on close.
+
+* 2.26 (10/30/2017)
+Scan animation now a button.
+Map lock off on scroll.
+Wrap every "toast" in Android 7.1 workaround.
+Upload interruption fix.
+Secret store Lineage fix.
+Updated German (thanks kill0rz!).
+
+* 2.25 (10/10/2017)
+Added clear DB Button.
+More android 7.1.2 toast workarounds.
+Fix non-SD storage use.
+Clearer network error messages.
+
+* 2.24 (09/18/2017)
+Fix scanning status indicator.
+Hide wifi filter for cell networks.
+Handle unexpected bssids in filters.
+
+* 2.22 (09/15/2017)
+Add bssid/oui filters for UI and DB.
+Avoid "BadTokenException: Unable to add window".
+Highlight exit button (thanks marmat8951!)
+Show WiGLE map tiles when fully zoomed.
+
+* 2.21 (08/13/2017)
+Change crypto to aes, rsa is broken in android-O.
+Enhanced List and Map settings pages.
+Added termination receiver.
+Conform to new android-O notification channels.
+Updated Danish translation (thanks Zarhn!).
+
+* 2.20 (07/22/2017)
+Show WiGLE networks on map (in Settings).
+No modal while uploading.
+Less observation importer memory usage.
+Improved icons and layouts.
+Language fixes (thanks Raffaele74 & kill0rz!)
+Error handling fixes.
+
 * 2.19 (04/30/2017)
 Fix for not using db_marker after restart.
 Fix for activate after anonymous.

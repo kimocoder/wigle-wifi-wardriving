@@ -5,6 +5,8 @@ import static android.location.LocationManager.NETWORK_PROVIDER;
 import net.wigle.wigleandroid.ListFragment;
 import net.wigle.wigleandroid.MainActivity;
 import net.wigle.wigleandroid.R;
+import net.wigle.wigleandroid.ui.WiGLEToast;
+
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.SharedPreferences.Editor;
@@ -18,11 +20,10 @@ import android.location.LocationManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.support.v4.content.ContextCompat;
-import android.widget.Toast;
 
 public class GPSListener implements Listener, LocationListener {
-    private static final long GPS_TIMEOUT = 15000L;
-    private static final long NET_LOC_TIMEOUT = 60000L;
+    public static final long GPS_TIMEOUT_DEFAULT = 15000L;
+    public static final long NET_LOC_TIMEOUT_DEFAULT = 60000L;
 
     private MainActivity mainActivity;
     private Location location;
@@ -36,7 +37,7 @@ public class GPSListener implements Listener, LocationListener {
     private LocationListener mapLocationListener;
     private int prevStatus = 0;
 
-    public GPSListener( MainActivity mainActivity ) {
+    public GPSListener( MainActivity mainActivity) {
         this.mainActivity = mainActivity;
     }
 
@@ -123,6 +124,8 @@ public class GPSListener implements Listener, LocationListener {
             return;
         }
 
+        final SharedPreferences prefs = mainActivity.getSharedPreferences( ListFragment.SHARED_PREFS, 0 );
+
         final LocationManager locationManager = (LocationManager)
                 mainActivity.getSystemService(Context.LOCATION_SERVICE);
 
@@ -135,8 +138,11 @@ public class GPSListener implements Listener, LocationListener {
         }
         final int satCount = getSatCount();
 
+        final long gpsTimeout = prefs.getLong(ListFragment.PREF_GPS_TIMEOUT, GPS_TIMEOUT_DEFAULT);
+        final long netLocTimeout = prefs.getLong(ListFragment.PREF_NET_LOC_TIMEOUT, NET_LOC_TIMEOUT_DEFAULT);
+
         boolean newOK = newLocation != null;
-        final boolean locOK = locationOK( location, satCount );
+        final boolean locOK = locationOK( location, satCount, gpsTimeout, netLocTimeout );
         final long now = System.currentTimeMillis();
 
         if ( newOK ) {
@@ -148,7 +154,7 @@ public class GPSListener implements Listener, LocationListener {
             else {
                 lastLocationTime = now;
                 // make sure there's enough sats on this new gps location
-                newOK = locationOK( newLocation, satCount );
+                newOK = locationOK( newLocation, satCount, gpsTimeout, netLocTimeout );
             }
         }
 
@@ -156,7 +162,7 @@ public class GPSListener implements Listener, LocationListener {
             newOK = true;
         }
 
-        final boolean netLocOK = locationOK( networkLocation, satCount );
+        final boolean netLocOK = locationOK( networkLocation, satCount, gpsTimeout, netLocTimeout );
 
         boolean wasProviderChange = false;
         if ( ! locOK ) {
@@ -227,12 +233,13 @@ public class GPSListener implements Listener, LocationListener {
                     + (locOK ? " locProvider: " + location.getProvider() : "")
                     + " newLocation: " + newLocation );
 
-            final SharedPreferences prefs = mainActivity.getSharedPreferences( ListFragment.SHARED_PREFS, 0 );
             final boolean disableToast = prefs.getBoolean( ListFragment.PREF_DISABLE_TOAST, false );
-            if (!disableToast) {
+            if (!disableToast && null != mainActivity && !mainActivity.isFinishing()) {
                 final String announce = location == null ? mainActivity.getString(R.string.lost_location)
                         : mainActivity.getString(R.string.have_location) + " \"" + location.getProvider() + "\"";
-                Toast.makeText( mainActivity, announce, Toast.LENGTH_SHORT ).show();
+                if (null != mainActivity && ! mainActivity.isFinishing()) {
+                    WiGLEToast.showOverActivity(mainActivity, R.string.gps_status, announce);
+                }
             }
 
             final boolean speechGPS = prefs.getBoolean( ListFragment.PREF_SPEECH_GPS, true );
@@ -255,14 +262,15 @@ public class GPSListener implements Listener, LocationListener {
 
     }
 
-    public void checkLocationOK() {
-        if ( ! locationOK( location, getSatCount() ) ) {
+    public void checkLocationOK(final long gpsTimeout, final long netLocsTimeout) {
+        if ( ! locationOK( location, getSatCount(), gpsTimeout, netLocsTimeout) ) {
             // do a self-check
             updateLocationData(null);
         }
     }
 
-    private boolean locationOK( final Location location, final int satCount ) {
+    private boolean locationOK( final Location location, final int satCount, final long gpsTimeout,
+                                final long networkLocationTimeout ) {
         boolean retval = false;
         final long now = System.currentTimeMillis();
 
@@ -280,13 +288,13 @@ public class GPSListener implements Listener, LocationListener {
                 // plenty of sats
                 satCountLowTime = null;
             }
-            boolean gpsLost = satCountLowTime != null && (now - satCountLowTime) > GPS_TIMEOUT;
-            gpsLost |= now - lastLocationTime > GPS_TIMEOUT;
+            boolean gpsLost = satCountLowTime != null && (now - satCountLowTime) > gpsTimeout;
+            gpsLost |= now - lastLocationTime > gpsTimeout;
             gpsLost |= horribleGps(location);
             retval = ! gpsLost;
         }
         else if ( NETWORK_PROVIDER.equals( location.getProvider() ) ) {
-            boolean gpsLost = now - lastNetworkLocationTime > NET_LOC_TIMEOUT;
+            boolean gpsLost = now - lastNetworkLocationTime > networkLocationTimeout;
             gpsLost |= horribleGps(location);
             retval = ! gpsLost;
         }
@@ -329,6 +337,18 @@ public class GPSListener implements Listener, LocationListener {
 
     public Location getLocation() {
         return location;
+    }
+
+    /**
+     * utility method which takes prefs and checks location freshness vs. configured limits
+     * @param prefs SharedPreferences instance containing PREF_GPS_TIMEOUT and PREF_NET_LOC_TIMEOUT values to check
+     * @return the location is valid
+     */
+    public Location checkGetLocation(final SharedPreferences prefs) {
+        final long gpsTimeout = prefs.getLong(ListFragment.PREF_GPS_TIMEOUT, GPSListener.GPS_TIMEOUT_DEFAULT);
+        final long netLocTimeout = prefs.getLong(ListFragment.PREF_NET_LOC_TIMEOUT, GPSListener.NET_LOC_TIMEOUT_DEFAULT);
+        checkLocationOK(gpsTimeout, netLocTimeout);
+        return getLocation();
     }
 
 }

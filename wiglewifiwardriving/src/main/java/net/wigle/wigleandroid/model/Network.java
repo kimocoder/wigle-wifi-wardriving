@@ -15,22 +15,24 @@ import com.google.maps.android.clustering.ClusterItem;
 @SuppressLint("UseSparseArrays")
 public final class Network implements ClusterItem {
     private final String bssid;
-    private final String ssid;
-    private final int frequency;
+    private String ssid;
     private final String capabilities;
-    private int level;
-    private final Integer channel;
     private final String showCapabilities;
     private final int crypto;
-    private final NetworkType type;
+    private NetworkType type;
+
+    private int frequency;
+    private int level;
+    private Integer channel;
     private LatLng geoPoint;
     private boolean isNew;
 
     private String detail;
-    private final long constructionTime = System.currentTimeMillis();
+    private final long constructionTime = System.currentTimeMillis(); // again
 
     private static final String BAR_STRING = " | ";
     private static final String DASH_STRING = " - ";
+    private static final String WPA2_CAP = "[WPA2";
     private static final String WPA_CAP = "[WPA";
     private static final String WEP_CAP = "[WEP";
 
@@ -38,6 +40,7 @@ public final class Network implements ClusterItem {
     public static final int CRYPTO_NONE = 0;
     public static final int CRYPTO_WEP = 1;
     public static final int CRYPTO_WPA = 2;
+    public static final int CRYPTO_WPA2 = 3;
 
     private static final Map<Integer,Integer> freqToChan;
     static {
@@ -103,7 +106,23 @@ public final class Network implements ClusterItem {
         this.capabilities = ( capabilities == null ) ? "" : capabilities;
         this.level = level;
         this.type = type;
-        this.channel = freqToChan.get( frequency );
+        if (this.type.equals(NetworkType.typeForCode("W"))) {
+            this.channel = freqToChan.get(frequency);
+        } else if (frequency != 0 && frequency != Integer.MAX_VALUE) {
+            //TODO: this maps *FCN directly to channel; could xlate to band by network type here (2/2)
+            /*if (NetworkType.GSM.equals(type)) {
+
+            } else if (NetworkType.LTE.equals(type)) {
+
+            } else if (NetworkType.WCDMA.equals(type)) {
+
+            } else {
+                channel = 0;
+            }*/
+            this.channel = frequency;
+        } else {
+            channel = null;
+        }
 
         if ( ! NetworkType.WIFI.equals( type ) ) {
             int semicolon = this.capabilities.lastIndexOf(";");
@@ -121,7 +140,9 @@ public final class Network implements ClusterItem {
             this.showCapabilities = null;
         }
 
-        if (this.capabilities.contains(WPA_CAP)) {
+        if (this.capabilities.contains(WPA2_CAP)) {
+            crypto = CRYPTO_WPA2;
+        } else if (this.capabilities.contains(WPA_CAP)) {
             crypto = CRYPTO_WPA;
         }
         else if (this.capabilities.contains(WEP_CAP)) {
@@ -169,6 +190,23 @@ public final class Network implements ClusterItem {
 
     public void setLevel( final int level ) {
         this.level = level;
+    }
+
+    // Overloading for *FCN in GSM-derived networks for now. a subclass is probably more correct.
+    public void setFrequency( final int frequency) {
+        this.frequency = frequency;
+        if (NetworkType.WIFI.equals(this.type)) {
+            this.channel = freqToChan.get(frequency);
+        } else if (frequency != 0 && frequency != Integer.MAX_VALUE) {
+            //TODO: this maps *FCN directly to channel; could xlate to band by network type here (2/2)
+            this.channel = frequency;
+        }
+    }
+
+    public void setType(final NetworkType type) { this.type = type; }
+
+    public void setSsid(final String ssid) {
+        this.ssid = ssid;
     }
 
     public void setIsNew() {
@@ -242,11 +280,15 @@ public final class Network implements ClusterItem {
 
     @Override
     public boolean equals(final Object other) {
-        if (other instanceof Network) {
+        if (other != null && other instanceof Network) {
             final Network o = (Network) other;
             return bssid.equals(o.bssid);
         }
         return false;
     }
 
+    /*public static final int lteChannelforEarfcn() {
+        BigDecimal[2] dlUlFrequs =
+        return 0;
+    }*/
 }
